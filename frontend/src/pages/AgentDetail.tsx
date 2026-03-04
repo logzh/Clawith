@@ -681,6 +681,8 @@ export default function AgentDetail() {
     const [promptModal, setPromptModal] = useState<{ title: string; placeholder: string; action: string } | null>(null);
     const [deleteConfirm, setDeleteConfirm] = useState<{ path: string; name: string; isDir: boolean } | null>(null);
     const [uploadToast, setUploadToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+    const [editingRole, setEditingRole] = useState(false);
+    const [roleInput, setRoleInput] = useState('');
     const showToast = (message: string, type: 'success' | 'error' = 'success') => {
         setUploadToast({ message, type });
         setTimeout(() => setUploadToast(null), 3000);
@@ -733,7 +735,39 @@ export default function AgentDetail() {
                             <p className="page-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <span className={`status-dot ${statusKey}`} />
                                 {t(`agent.status.${statusKey}`)}
-                                {agent.role_description && <span>· {agent.role_description}</span>}
+                                {editingRole ? (
+                                    <input
+                                        autoFocus
+                                        value={roleInput}
+                                        onChange={e => setRoleInput(e.target.value)}
+                                        onBlur={async () => {
+                                            setEditingRole(false);
+                                            if (roleInput !== agent.role_description) {
+                                                await agentApi.update(id!, { role_description: roleInput } as any);
+                                                queryClient.invalidateQueries({ queryKey: ['agent', id] });
+                                            }
+                                        }}
+                                        onKeyDown={async e => {
+                                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                            if (e.key === 'Escape') { setEditingRole(false); setRoleInput(agent.role_description || ''); }
+                                        }}
+                                        style={{
+                                            background: 'var(--bg-elevated)', border: '1px solid var(--accent-primary)',
+                                            borderRadius: '4px', color: 'var(--text-primary)', fontSize: '13px',
+                                            padding: '2px 6px', width: '320px', outline: 'none',
+                                        }}
+                                    />
+                                ) : (
+                                    <span
+                                        title="Click to edit"
+                                        onClick={() => { setRoleInput(agent.role_description || ''); setEditingRole(true); }}
+                                        style={{ cursor: 'text', borderBottom: '1px dashed transparent' }}
+                                        onMouseEnter={e => (e.currentTarget.style.borderBottomColor = 'var(--text-tertiary)')}
+                                        onMouseLeave={e => (e.currentTarget.style.borderBottomColor = 'transparent')}
+                                    >
+                                        {agent.role_description ? `· ${agent.role_description}` : <span style={{ color: 'var(--text-tertiary)', fontSize: '12px' }}>· {t('agent.fields.role', 'Click to add a description...')}</span>}
+                                    </span>
+                                )}
                                 {(agent as any).is_expired && (
                                     <span style={{ background: 'var(--error)', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600 }}>⏰ Expired</span>
                                 )}
