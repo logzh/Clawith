@@ -1,6 +1,7 @@
 # ClawCrew
 node_modules/
 dist/
+*.zip
 build/
 __pycache__/
 *.pyc
