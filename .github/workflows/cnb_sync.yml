@@ -18,7 +18,7 @@ jobs:
       - name: Sync to CNB repository
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          CNB_ORG: ${{ vars.CNB_ORG }}
+          CNB_NAMESPACE: ${{ vars.CNB_NAMESPACE }}
         run: |
           set -euo pipefail
 
@@ -27,7 +27,7 @@ jobs:
             exit 1
           fi
 
-          ORG_NAME="${CNB_ORG:-${GITHUB_REPOSITORY_OWNER}}"
+          ORG_NAME="${CNB_NAMESPACE:-${GITHUB_REPOSITORY_OWNER}}"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           TARGET_URL="https://cnb.cool/${ORG_NAME}/${REPO_NAME}.git"
 
