@@ -37,6 +37,7 @@ class TenantOut(BaseModel):
     is_active: bool
     sso_enabled: bool = False
     sso_domain: str | None = None
+    a2a_async_enabled: bool = False
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -49,6 +50,7 @@ class TenantUpdate(BaseModel):
     is_active: bool | None = None
     sso_enabled: bool | None = None
     sso_domain: str | None = None
+    a2a_async_enabled: bool | None = None
 
 
 # ─── Helpers ────────────────────────────────────────────
@@ -419,8 +421,11 @@ async def get_tenant(
     """Get tenant details. Platform admins can view any; org_admins only their own."""
     if current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
-    if current_user.role == "org_admin" and str(current_user.tenant_id) != str(tenant_id):
-        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role == "org_admin":
+        if not current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="Organization admin must belong to a company")
+        if current_user.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Access denied")
     result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
@@ -436,8 +441,11 @@ async def update_tenant(
     db: AsyncSession = Depends(get_db),
 ):
     """Update tenant settings. Platform admins can update any; org_admins only their own."""
-    if current_user.role == "org_admin" and str(current_user.tenant_id) != str(tenant_id):
-        raise HTTPException(status_code=403, detail="Can only update your own company")
+    if current_user.role == "org_admin":
+        if not current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="Organization admin must belong to a company")
+        if current_user.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Can only update your own company")
     result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
