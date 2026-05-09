@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { enterpriseApi, skillApi } from '../services/api';
@@ -10,6 +10,24 @@ import { saveAccentColor, getSavedAccentColor, resetAccentColor, PRESET_COLORS }
 import UserManagement from './UserManagement';
 import InvitationCodes from './InvitationCodes';
 import LinearCopyButton from '../components/LinearCopyButton';
+import { useDialog } from '../components/Dialog/DialogProvider';
+import { useToast } from '../components/Toast/ToastProvider';
+import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
+import {
+    IconBrowser,
+    IconBulb,
+    IconChevronDown,
+    IconClock,
+    IconCheck,
+    IconEdit,
+    IconFileText,
+    IconMessageCircle,
+    IconSearch,
+    IconSettings,
+    IconTerminal2,
+    IconTools,
+    IconUser,
+} from '@tabler/icons-react';
 // API helpers for enterprise endpoints
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
@@ -131,6 +149,8 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
     idpType: string; existingProvider: any; tenant: any; t: any;
 }) {
     const qc = useQueryClient();
+    const dialog = useDialog();
+    const toast = useToast();
     const [liveDomain, setLiveDomain] = useState<string>(existingProvider?.sso_domain || tenant?.sso_domain || '');
     const [ssoError, setSsoError] = useState<string>('');
     const [toggling, setToggling] = useState(false);
@@ -145,7 +165,7 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
 
     const handleSsoToggle = async () => {
         if (!existingProvider) {
-            alert(t('enterprise.identity.saveFirst', 'Please save the configuration first to enable SSO.'));
+            toast.warning(t('enterprise.identity.saveFirst', 'Please save the configuration first to enable SSO.'));
             return;
         }
         const newVal = !ssoEnabled;
@@ -285,6 +305,7 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
 // ─── Org & Identity Tab ─────────────────────────────
 function OrgTab({ tenant }: { tenant: any }) {
     const { t } = useTranslation();
+    const dialog = useDialog();
     const qc = useQueryClient();
 
 
@@ -536,10 +557,28 @@ function OrgTab({ tenant }: { tenant: any }) {
         }
     };
 
+    const handleGoogleAdminAuthorize = async (providerId: string) => {
+        const res = await fetchJson<{ authorization_url: string }>(`/enterprise/identity-providers/${providerId}/google-workspace-sync/authorize-url`);
+        const popup = window.open(res.authorization_url, 'google-workspace-sync', 'width=640,height=760');
+        if (!popup) {
+            window.location.href = res.authorization_url;
+            return;
+        }
+
+        const onMessage = (event: MessageEvent) => {
+            if (event.data?.type === 'google-workspace-sync-authorized') {
+                window.removeEventListener('message', onMessage);
+                qc.invalidateQueries({ queryKey: ['identity-providers'] });
+            }
+        };
+        window.addEventListener('message', onMessage);
+    };
+
     const IDP_TYPES = [
         { type: 'feishu', name: 'Feishu', desc: 'Feishu / Lark Integration', icon: <img src="/feishu.png" width="20" height="20" alt="Feishu" /> },
         { type: 'wecom', name: 'WeCom', desc: 'WeChat Work Integration', icon: <img src="/wecom.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="WeCom" /> },
         { type: 'dingtalk', name: 'DingTalk', desc: 'DingTalk App Integration', icon: <img src="/dingtalk.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="DingTalk" /> },
+        { type: 'google_workspace', name: 'Google', desc: 'Google Admin Directory Sync', icon: <img src="/google.svg" width="20" height="20" alt="Google" /> },
         { type: 'oauth2', name: 'OAuth2', desc: 'Generic OIDC Provider', icon: <div style={{ width: 20, height: 20, background: 'var(--accent-primary)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10, fontWeight: 700 }}>O</div> }
     ];
 
@@ -559,8 +598,12 @@ function OrgTab({ tenant }: { tenant: any }) {
                 feishu: { app_id: '', app_secret: '', corp_id: '' },
                 dingtalk: { app_key: '', app_secret: '', corp_id: '' },
                 wecom: { corp_id: '', secret: '', agent_id: '', app_secret: '', bot_id: '', bot_secret: '', verify_token: '', verify_aes_key: '' },
+                google_workspace: {
+                    client_id: '',
+                    client_secret: '',
+                },
             };
-            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', oauth2: 'OAuth2' };
+            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', google_workspace: 'Google', oauth2: 'OAuth2' };
             setForm({
                 provider_type: type,
                 name: nameMap[type] || type,
@@ -574,13 +617,22 @@ function OrgTab({ tenant }: { tenant: any }) {
     };
 
     const renderForm = (type: string, existingProvider?: any) => {
+        const providerBaseUrl = (() => {
+            const rawDomain = existingProvider?.sso_domain || tenant?.sso_domain || '';
+            if (rawDomain) {
+                return rawDomain.startsWith('http') ? rawDomain : `https://${rawDomain}`;
+            }
+            return window.location.origin;
+        })();
+        const providerCallbackUrl = `${providerBaseUrl}/api/auth/${type}/callback`;
+
         return (
             <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
                 {/* Setup Guide moved to the top */}
-                {['feishu', 'dingtalk'].includes(type) && (
+                {['feishu', 'dingtalk', 'google_workspace'].includes(type) && (
                     <div style={{ background: 'var(--bg-primary)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-subtle)', marginBottom: '20px', fontSize: '12px' }}>
-                        <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)' }}>
-                            👉 {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
+                        <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <IconSettings size={15} stroke={1.8} /> {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
                         </div>
                         <div style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                             {type === 'feishu' && (
@@ -615,6 +667,15 @@ function OrgTab({ tenant }: { tenant: any }) {
                                             {i + 1}. {t(`enterprise.org.syncGuide.dingtalk.step${i + 1}`)}
                                         </div>
                                     ))}
+                                </>
+                            )}
+                            {type === 'google_workspace' && (
+                                <>
+                                    <div style={{ marginBottom: '6px' }}>1. 在 Google Cloud 创建 OAuth Web App，并填入 Client ID 与 Client Secret。</div>
+                                    <div style={{ marginBottom: '6px' }}>2. 将下方同一个 Redirect URL 配置到 Google Cloud 的 Authorized redirect URIs。</div>
+                                    <div style={{ marginBottom: '6px' }}>3. SSO 登录直接使用这套配置。</div>
+                                    <div style={{ marginBottom: '6px' }}>4. 组织同步时，使用有 Directory 读取权限的 Google Workspace 管理员账号点击授权。</div>
+                                    <div style={{ marginBottom: '6px' }}>5. 后端会加密保存管理员 refresh token，后续定时同步会自动刷新 access token。</div>
                                 </>
                             )}
                             {type === 'wecom' && (
@@ -717,6 +778,93 @@ function OrgTab({ tenant }: { tenant: any }) {
                             <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} />
                         </div>
                     </div>
+                ) : type === 'google_workspace' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={{ padding: '14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)' }}>
+                            <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '10px' }}>Google OAuth</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                        {t('enterprise.identity.providerHints.google_workspace', 'Google Workspace: use one Client ID and Client Secret for both SSO and admin-authorized directory sync.')}
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Client ID</label>
+                                    <input
+                                        className="form-input"
+                                        value={form.config.client_id || ''}
+                                        onChange={e => setForm({ ...form, config: { ...form.config, client_id: e.target.value } })}
+                                        placeholder="xxxxxxxx.apps.googleusercontent.com"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Client Secret</label>
+                                    <input
+                                        className="form-input"
+                                        type="password"
+                                        value={form.config.client_secret || ''}
+                                        onChange={e => setForm({ ...form, config: { ...form.config, client_secret: e.target.value } })}
+                                    />
+                                </div>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">{t('enterprise.identity.callbackUrl', 'Redirect URL (paste this in your app settings)')}</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <div style={{
+                                            flex: 1,
+                                            padding: '8px 12px',
+                                            background: 'var(--bg-elevated)',
+                                            border: '1px solid var(--border-subtle)',
+                                            borderRadius: '6px',
+                                            fontSize: '12px',
+                                            color: 'var(--text-primary)',
+                                            fontFamily: 'monospace',
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis'
+                                        }}>
+                                            {providerCallbackUrl}
+                                        </div>
+                                        <LinearCopyButton
+                                            className="btn btn-ghost btn-sm"
+                                            style={{ fontSize: '11px', width: 'auto', minWidth: '70px', height: '33px' }}
+                                            textToCopy={providerCallbackUrl}
+                                            label={t('common.copy', 'Copy')}
+                                            copiedLabel="Copied"
+                                        />
+                                    </div>
+                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        {t('enterprise.identity.callbackUrlHint', "Add this URL as the OAuth redirect URI in your identity provider's app configuration.")}
+                                    </div>
+                                </div>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">Directory Sync Authorization</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            type="button"
+                                            onClick={() => existingProvider && handleGoogleAdminAuthorize(existingProvider.id)}
+                                            disabled={!existingProvider}
+                                        >
+                                            {existingProvider?.config?.google_admin_authorized_email ? 'Re-authorize Admin Sync' : 'Authorize Admin Sync'}
+                                        </button>
+                                        {!existingProvider && (
+                                            <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                Please save the provider first.
+                                            </span>
+                                        )}
+                                        {existingProvider?.config?.google_admin_authorized_email && (
+                                            <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                                Authorized as {existingProvider.config.google_admin_authorized_email}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        Sign in with a Google Workspace admin account to grant directory read access. Clawith will securely store a refresh token and use it for scheduled sync.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 ) : type === 'feishu' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
@@ -743,7 +891,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                             <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
                         )}
                         {existingProvider && (
-                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
+                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={async () => { const ok = await dialog.confirm('确定要删除此配置吗？', { title: '删除配置', danger: true, confirmLabel: '删除' }); if (ok) deleteProvider.mutate(existingProvider.id); }}>
                                 {t('common.delete', 'Delete')}
                             </button>
                         )}
@@ -807,7 +955,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     <div style={{ fontWeight: 500, fontSize: '14px' }}>{t('enterprise.org.orgBrowser', 'Organization Browser')}</div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                        {['feishu', 'dingtalk'].includes(p.provider_type) && (
+                        {['feishu', 'dingtalk', 'google_workspace'].includes(p.provider_type) && (
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: '12px' }} onClick={() => triggerSync(p.id)} disabled={!!syncing}>
                                 {syncing === p.id ? 'Syncing...' : 'Sync Directory'}
                             </button>
@@ -919,7 +1067,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                         {renderForm(idp.type, existingProvider)}
 
                                         {/* Per-channel SSO Login URLs & Toggle */}
-                                        {['feishu', 'dingtalk', 'oauth2'].includes(idp.type) && (
+                                        {['feishu', 'dingtalk', 'google_workspace', 'oauth2'].includes(idp.type) && (
                                             <SsoChannelSection
                                                 idpType={idp.type}
                                                 existingProvider={existingProvider}
@@ -966,8 +1114,10 @@ function ThemeColorPicker() {
     };
 
     return (
-        <div className="card" style={{ marginTop: '16px', marginBottom: '16px' }}>
-            <h4 style={{ marginBottom: '12px' }}>{t('enterprise.config.themeColor')}</h4>
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '10px' }}>
+                {t('enterprise.config.themeColor')}
+            </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
                 {PRESET_COLORS.map(c => (
                     <div
@@ -1513,7 +1663,267 @@ function SkillsTab() {
 
 
 
-// ─── Company Name Editor ───────────────────────────
+// ─── Company Identity Editor ───────────────────────
+function CompanyLogoCropModal({ imageUrl, imageName, onCancel, onSave }: {
+    imageUrl: string;
+    imageName: string;
+    onCancel: () => void;
+    onSave: (blob: Blob) => void;
+}) {
+    const { t } = useTranslation();
+    const imgRef = useRef<HTMLImageElement>(null);
+    const [naturalSize, setNaturalSize] = useState({ width: 1, height: 1 });
+    const [zoom, setZoom] = useState(1);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const [dragStart, setDragStart] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
+    const cropSize = 240;
+
+    const clampOffset = (next: { x: number; y: number }, nextZoom = zoom) => {
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * nextZoom;
+        const displayH = naturalSize.height * baseScale * nextZoom;
+        const maxX = Math.max(0, (displayW - cropSize) / 2);
+        const maxY = Math.max(0, (displayH - cropSize) / 2);
+        return {
+            x: Math.min(maxX, Math.max(-maxX, next.x)),
+            y: Math.min(maxY, Math.max(-maxY, next.y)),
+        };
+    };
+
+    const handleSave = () => {
+        const img = imgRef.current;
+        if (!img) return;
+        const outputSize = 512;
+        const ratio = outputSize / cropSize;
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * zoom;
+        const displayH = naturalSize.height * baseScale * zoom;
+        const dx = ((cropSize - displayW) / 2 + offset.x) * ratio;
+        const dy = ((cropSize - displayH) / 2 + offset.y) * ratio;
+        const canvas = document.createElement('canvas');
+        canvas.width = outputSize;
+        canvas.height = outputSize;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, outputSize, outputSize);
+        ctx.drawImage(img, dx, dy, displayW * ratio, displayH * ratio);
+        canvas.toBlob((blob) => {
+            if (blob) onSave(blob);
+        }, 'image/png');
+    };
+
+    return (
+        <div className="tenant-logo-crop-backdrop" onClick={onCancel}>
+            <div className="tenant-logo-crop-modal" onClick={e => e.stopPropagation()}>
+                <div className="tenant-logo-crop-header">
+                    <div>
+                        <h3>{t('enterprise.logo.cropTitle', 'Crop company logo')}</h3>
+                        <p>{imageName}</p>
+                    </div>
+                    <button type="button" onClick={onCancel}>×</button>
+                </div>
+                <div
+                    className="tenant-logo-crop-stage"
+                    onPointerDown={e => {
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                        setDragStart({ x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y });
+                    }}
+                    onPointerMove={e => {
+                        if (!dragStart) return;
+                        setOffset(clampOffset({
+                            x: dragStart.ox + e.clientX - dragStart.x,
+                            y: dragStart.oy + e.clientY - dragStart.y,
+                        }));
+                    }}
+                    onPointerUp={() => setDragStart(null)}
+                    onPointerCancel={() => setDragStart(null)}
+                >
+                    <img
+                        ref={imgRef}
+                        src={imageUrl}
+                        alt=""
+                        draggable={false}
+                        onLoad={e => {
+                            const img = e.currentTarget;
+                            setNaturalSize({ width: img.naturalWidth || 1, height: img.naturalHeight || 1 });
+                            setOffset({ x: 0, y: 0 });
+                            setZoom(1);
+                        }}
+                        style={{
+                            width: `${naturalSize.width * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            height: `${naturalSize.height * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-controls">
+                    <span>{t('enterprise.logo.zoom', 'Zoom')}</span>
+                    <input
+                        type="range"
+                        min="1"
+                        max="3"
+                        step="0.01"
+                        value={zoom}
+                        onChange={e => {
+                            const nextZoom = Number(e.target.value);
+                            setZoom(nextZoom);
+                            setOffset(prev => clampOffset(prev, nextZoom));
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-actions">
+                    <button className="btn btn-secondary" type="button" onClick={onCancel}>{t('common.cancel', 'Cancel')}</button>
+                    <button className="btn btn-primary" type="button" onClick={handleSave}>{t('common.save', 'Save')}</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function CompanyLogoEditor() {
+    const { t } = useTranslation();
+    const qc = useQueryClient();
+    const tenantId = localStorage.getItem('current_tenant_id') || '';
+    const [name, setName] = useState('');
+    const [logoUrl, setLogoUrl] = useState('');
+    const [logoError, setLogoError] = useState('');
+    const [logoSaving, setLogoSaving] = useState(false);
+    const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => {
+                if (d?.name) setName(d.name);
+                setLogoUrl(d?.logo_url || '');
+            })
+            .catch(() => { });
+    }, [tenantId]);
+
+    const handleLogoFile = (file: File | undefined) => {
+        setLogoError('');
+        if (!file) return;
+        if (file.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.tooLarge', 'Logo image must be 1 MB or smaller.'));
+            return;
+        }
+        if (!file.type.startsWith('image/')) {
+            setLogoError(t('enterprise.logo.invalidType', 'Please choose an image file.'));
+            return;
+        }
+        setCropSource({ url: URL.createObjectURL(file), name: file.name });
+    };
+
+    const uploadCroppedLogo = async (blob: Blob) => {
+        if (!tenantId) return;
+        setLogoError('');
+        if (blob.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.croppedTooLarge', 'Cropped logo is still larger than 1 MB.'));
+            return;
+        }
+        setLogoSaving(true);
+        try {
+            const form = new FormData();
+            form.append('file', blob, 'company-logo.png');
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+                body: form,
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+            }
+            const tenant = await res.json();
+            setLogoUrl(tenant.logo_url || '');
+            setCropSource(null);
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
+    const resetLogo = async () => {
+        if (!tenantId || !logoUrl) return;
+        setLogoError('');
+        setLogoSaving(true);
+        try {
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+            }
+            setLogoUrl('');
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                {t('enterprise.logo.title', 'Company Logo')}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '14px' }}>
+                {t('enterprise.logo.description', 'Used in the sidebar workspace switcher and company selection menus.')}
+            </div>
+            <div className="company-identity-logo-row">
+                <div className="company-identity-logo-preview">
+                    {logoUrl ? <img src={logoUrl} alt="" /> : <span>{(Array.from(name.trim())[0] as string | undefined)?.toUpperCase() || 'C'}</span>}
+                </div>
+                <div>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        style={{ display: 'none' }}
+                        onChange={e => {
+                            handleLogoFile(e.target.files?.[0]);
+                            e.currentTarget.value = '';
+                        }}
+                    />
+                    <button className="btn btn-secondary" type="button" onClick={() => fileInputRef.current?.click()} disabled={logoSaving}>
+                        {logoSaving ? t('common.loading') : t('enterprise.logo.upload', 'Upload logo')}
+                    </button>
+                    {logoUrl && (
+                        <button
+                            className="btn btn-ghost"
+                            type="button"
+                            onClick={resetLogo}
+                            disabled={logoSaving}
+                            style={{ marginLeft: '8px' }}
+                        >
+                            {t('enterprise.logo.reset', 'Reset to default')}
+                        </button>
+                    )}
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
+                        {t('enterprise.logo.hint', 'PNG, JPG, or WebP. Max 1 MB. You will crop it to a square before saving.')}
+                    </div>
+                    {logoError && <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '6px' }}>{logoError}</div>}
+                </div>
+            </div>
+            {cropSource && (
+                <CompanyLogoCropModal
+                    imageUrl={cropSource.url}
+                    imageName={cropSource.name}
+                    onCancel={() => setCropSource(null)}
+                    onSave={uploadCroppedLogo}
+                />
+            )}
+        </div>
+    );
+}
+
 function CompanyNameEditor() {
     const { t } = useTranslation();
     const qc = useQueryClient();
@@ -1537,6 +1947,8 @@ function CompanyNameEditor() {
                 method: 'PUT', body: JSON.stringify({ name: name.trim() }),
             });
             qc.invalidateQueries({ queryKey: ['tenants'] });
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) { }
@@ -1545,6 +1957,9 @@ function CompanyNameEditor() {
 
     return (
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '10px' }}>
+                {t('enterprise.companyName.title', 'Company Name')}
+            </div>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                 <input
                     className="form-input"
@@ -1557,59 +1972,88 @@ function CompanyNameEditor() {
                 <button className="btn btn-primary" onClick={handleSave} disabled={saving || !name.trim()}>
                     {saving ? t('common.loading') : t('common.save', 'Save')}
                 </button>
-                {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
+                {saved && <IconCheck size={15} stroke={2} style={{ color: 'var(--success)' }} />}
             </div>
         </div>
     );
 }
 
 
-// ─── Company Timezone Editor ───────────────────────
-const COMMON_TIMEZONES = [
-    'UTC',
-    'Asia/Shanghai',
-    'Asia/Tokyo',
-    'Asia/Seoul',
-    'Asia/Singapore',
-    'Asia/Kolkata',
-    'Asia/Dubai',
-    'Europe/London',
-    'Europe/Paris',
-    'Europe/Berlin',
-    'Europe/Moscow',
-    'America/New_York',
-    'America/Chicago',
-    'America/Denver',
-    'America/Los_Angeles',
-    'America/Sao_Paulo',
-    'Australia/Sydney',
-    'Pacific/Auckland',
-];
-
 function CompanyTimezoneEditor() {
-    const { t } = useTranslation();
+    const { t, i18n } = useTranslation();
     const user = useAuthStore((s) => s.user);
     const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
+    const regionPickerRef = useRef<HTMLDivElement>(null);
     const [timezone, setTimezone] = useState('UTC');
+    const [countryRegion, setCountryRegion] = useState('001');
+    const [regionInput, setRegionInput] = useState('');
+    const [regionOpen, setRegionOpen] = useState(false);
+    const [highlightedRegion, setHighlightedRegion] = useState(0);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
+    const zh = i18n.language?.startsWith('zh');
+    const companyRegions = useMemo(() => buildCompanyRegions(zh ? 'zh-Hans' : 'en'), [zh]);
+    const regionLabel = (r: CompanyRegion) => zh ? r.zh : r.en;
+    const selectedRegion = companyRegions.find(r => r.code === countryRegion) || companyRegions[0];
+    const filteredRegions = useMemo(() => {
+        const query = regionInput.trim().toLowerCase();
+        if (!query || (!regionOpen && regionInput === regionLabel(selectedRegion))) return companyRegions;
+        return companyRegions.filter(r => {
+            const localName = regionLabel(r).toLowerCase();
+            const altName = (zh ? r.en : r.zh).toLowerCase();
+            return localName.includes(query)
+                || altName.includes(query)
+                || r.code.toLowerCase().includes(query)
+                || r.timezone.toLowerCase().includes(query);
+        });
+    }, [companyRegions, regionInput, regionOpen, selectedRegion, zh]);
+
+    useEffect(() => {
+        setRegionInput(regionLabel(selectedRegion));
+    }, [countryRegion, zh]);
+
+    useEffect(() => {
+        if (!regionOpen) return;
+        const handlePointerDown = (e: MouseEvent) => {
+            if (!regionPickerRef.current?.contains(e.target as Node)) {
+                setRegionOpen(false);
+                setRegionInput(regionLabel(selectedRegion));
+                setHighlightedRegion(0);
+            }
+        };
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [regionOpen, selectedRegion, zh]);
+
+    useEffect(() => {
+        setHighlightedRegion(0);
+    }, [regionInput]);
 
     useEffect(() => {
         if (!tenantId) return;
         fetchJson<any>(`/tenants/${tenantId}`)
-            .then(d => { if (d?.timezone) setTimezone(d.timezone); })
+            .then(d => {
+                if (d?.timezone) setTimezone(d.timezone);
+                if (d?.country_region) setCountryRegion(d.country_region);
+            })
             .catch((e: any) => setError(e.message || 'Failed to load timezone'));
     }, [tenantId]);
 
-    const handleSave = async (tz: string) => {
+    const handleSave = async (regionCode: string) => {
         if (!tenantId) return;
-        setTimezone(tz);
+        const region = companyRegions.find(r => r.code === regionCode) || companyRegions[0];
+        setCountryRegion(region.code);
+        setTimezone(region.timezone);
         setSaving(true);
         setError('');
         try {
             await fetchJson(`/tenants/${tenantId}`, {
-                method: 'PUT', body: JSON.stringify({ timezone: tz }),
+                method: 'PUT',
+                body: JSON.stringify({
+                    country_region: region.code,
+                    timezone: region.timezone,
+                }),
             });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
@@ -1619,37 +2063,284 @@ function CompanyTimezoneEditor() {
         setSaving(false);
     };
 
+    const selectRegion = (region: CompanyRegion) => {
+        setRegionInput(regionLabel(region));
+        setRegionOpen(false);
+        setHighlightedRegion(0);
+        if (region.code !== countryRegion) {
+            handleSave(region.code);
+        }
+    };
+
     return (
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
-            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 500, fontSize: '13px', marginBottom: '4px' }}>🌐 {t('enterprise.timezone.title', 'Company Timezone')}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {t('enterprise.timezone.description', 'Default timezone for all agents. Agents can override individually.')}
-                    </div>
-                    {error && (
-                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                            ⚠ {error}
-                        </div>
-                    )}
-                    {!tenantId && (
-                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                            ⚠ {t('enterprise.timezone.noTenant', 'No company selected. Please refresh the page or contact support.')}
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                {zh ? '公司所在国家或地区' : 'Company Country or Region'}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                {zh
+                    ? `用于自动设置公司默认时区和 OKR 休息日规则。当前时区：${timezone}`
+                    : `Used to set the company timezone and OKR non-workday rules. Current timezone: ${timezone}`}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '10px', width: '100%' }}>
+                <div ref={regionPickerRef} style={{ position: 'relative', width: 'min(420px, 100%)' }}>
+                    <input
+                        className="form-input"
+                        value={regionInput}
+                        onChange={e => {
+                            setRegionInput(e.target.value);
+                            setRegionOpen(true);
+                        }}
+                        onFocus={() => {
+                            setRegionOpen(true);
+                            setRegionInput('');
+                        }}
+                        onKeyDown={e => {
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setRegionOpen(true);
+                                setHighlightedRegion(i => Math.min(i + 1, Math.max(filteredRegions.length - 1, 0)));
+                            } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setHighlightedRegion(i => Math.max(i - 1, 0));
+                            } else if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const region = filteredRegions[highlightedRegion];
+                                if (region) selectRegion(region);
+                            } else if (e.key === 'Escape') {
+                                setRegionOpen(false);
+                                setRegionInput(regionLabel(selectedRegion));
+                            }
+                        }}
+                        placeholder={zh ? '搜索国家或地区、代码或时区' : 'Search country, code, or timezone'}
+                        style={{
+                            width: '100%',
+                            fontSize: '13px',
+                            paddingRight: '42px',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'text',
+                        }}
+                        disabled={saving || !tenantId}
+                        role="combobox"
+                        aria-expanded={regionOpen}
+                        aria-controls="company-region-listbox"
+                        aria-autocomplete="list"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (saving || !tenantId) return;
+                            setRegionOpen(v => !v);
+                            if (!regionOpen) setRegionInput('');
+                        }}
+                        disabled={saving || !tenantId}
+                        aria-label={regionOpen ? (zh ? '收起地区列表' : 'Collapse region list') : (zh ? '展开地区列表' : 'Expand region list')}
+                        style={{
+                            position: 'absolute',
+                            right: '7px',
+                            top: '50%',
+                            transform: `translateY(-50%) rotate(${regionOpen ? 180 : 0}deg)`,
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'var(--text-secondary)',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'pointer',
+                            width: '30px',
+                            height: '30px',
+                            padding: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'transform 120ms ease',
+                        }}
+                    >
+                        <span
+                            aria-hidden="true"
+                            style={{
+                                width: '8px',
+                                height: '8px',
+                                borderRight: '1.6px solid currentColor',
+                                borderBottom: '1.6px solid currentColor',
+                                transform: 'rotate(45deg) translateY(-2px)',
+                                borderRadius: '1px',
+                            }}
+                        />
+                    </button>
+                    {regionOpen && (
+                        <div
+                            id="company-region-listbox"
+                            role="listbox"
+                            style={{
+                                position: 'absolute',
+                                top: 'calc(100% + 6px)',
+                                left: 0,
+                                right: 0,
+                                zIndex: 30,
+                                background: 'var(--bg-primary)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: '8px',
+                                boxShadow: '0 12px 28px rgba(15, 23, 42, 0.14)',
+                                maxHeight: '260px',
+                                overflowY: 'auto',
+                                padding: '6px',
+                            }}
+                        >
+                            {filteredRegions.length > 0 ? filteredRegions.map((region, index) => {
+                                const active = region.code === countryRegion;
+                                const highlighted = index === highlightedRegion;
+                                return (
+                                    <button
+                                        key={region.code}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={active}
+                                        onMouseEnter={() => setHighlightedRegion(index)}
+                                        onMouseDown={e => e.preventDefault()}
+                                        onClick={() => selectRegion(region)}
+                                        style={{
+                                            width: '100%',
+                                            border: 'none',
+                                            background: highlighted ? 'var(--bg-elevated)' : 'transparent',
+                                            color: 'var(--text-primary)',
+                                            borderRadius: '6px',
+                                            padding: '9px 10px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            textAlign: 'left',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        <span style={{ minWidth: 0 }}>
+                                            <span style={{ display: 'block', fontSize: '13px', fontWeight: active ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {regionLabel(region)}
+                                            </span>
+                                            <span style={{ display: 'block', marginTop: '2px', color: 'var(--text-tertiary)', fontSize: '11px' }}>
+                                                {region.code} · {region.timezone}
+                                            </span>
+                                        </span>
+                                        {active && <span style={{ color: 'var(--text-primary)', fontSize: '14px', flexShrink: 0 }}>✓</span>}
+                                    </button>
+                                );
+                            }) : (
+                                <div style={{ padding: '12px 10px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                                    {zh ? '没有匹配的国家或地区' : 'No matching country or region'}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
-                <select
-                    className="form-input"
-                    value={timezone}
-                    onChange={e => handleSave(e.target.value)}
-                    style={{ width: '220px', fontSize: '13px' }}
-                    disabled={saving || !tenantId}
-                >
-                    {COMMON_TIMEZONES.map(tz => (
-                        <option key={tz} value={tz}>{tz}</option>
-                    ))}
-                </select>
-                {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
+                {(saved || error || !tenantId) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minHeight: '16px', flexWrap: 'wrap' }}>
+                        {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>已保存</span>}
+                        {error && (
+                            <div style={{ fontSize: '11px', color: 'var(--error)' }}>
+                                {error}
+                            </div>
+                        )}
+                        {!tenantId && (
+                            <div style={{ fontSize: '11px', color: 'var(--error)' }}>
+                                {t('enterprise.timezone.noTenant', 'No company selected. Please refresh the page or contact support.')}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+
+function A2AAsyncToggle() {
+    const { t, i18n } = useTranslation();
+    const user = useAuthStore((s) => s.user);
+    const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
+    const [enabled, setEnabled] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const zh = i18n.language?.startsWith('zh');
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => setEnabled(!!d?.a2a_async_enabled))
+            .catch((e: any) => setError(e.message || 'Failed to load A2A setting'));
+    }, [tenantId]);
+
+    const handleToggle = async () => {
+        if (!tenantId || saving) return;
+        const next = !enabled;
+        setEnabled(next);
+        setSaving(true);
+        setError('');
+        try {
+            await fetchJson(`/tenants/${tenantId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ a2a_async_enabled: next }),
+            });
+        } catch (e: any) {
+            setEnabled(!next);
+            setError(e.message || 'Failed to save A2A setting');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                {zh ? 'Agent 异步协作（Beta）' : 'Agent Async Collaboration (Beta)'}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                {zh
+                    ? '开启后，数字员工之间可使用 notify / task_delegate 等异步协作模式。关闭后，Agent 间消息统一走同步 consult。'
+                    : 'When enabled, agents can use async notify and task_delegate modes. When disabled, agent-to-agent messaging falls back to synchronous consult.'}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                <div style={{ width: '100%' }}>
+                    {error && (
+                        <div style={{ fontSize: '11px', color: 'var(--error)' }}>
+                            {error}
+                        </div>
+                    )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', flexShrink: 0, opacity: saving ? 0.6 : 1 }}>
+                        <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={handleToggle}
+                            disabled={saving || !tenantId}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                        />
+                        <span style={{
+                            position: 'absolute', inset: 0,
+                            borderRadius: '999px',
+                            cursor: saving ? 'not-allowed' : 'pointer',
+                            background: enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
+                            transition: '0.2s',
+                        }}>
+                            <span style={{
+                                position: 'absolute',
+                                top: '2px',
+                                left: enabled ? '20px' : '2px',
+                                width: '18px',
+                                height: '18px',
+                                borderRadius: '50%',
+                                background: '#fff',
+                                transition: '0.2s',
+                                boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
+                            }} />
+                        </span>
+                    </label>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {enabled ? (zh ? '已开启' : 'Enabled') : (zh ? '已关闭' : 'Disabled')}
+                    </span>
+                </div>
+            </div>
+            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)', maxWidth: '640px' }}>
+                {zh
+                    ? '说明：OKR 日报收集本身会优先使用更稳的同步方式，不依赖这里的异步开关。'
+                    : 'Note: OKR daily collection itself uses the more reliable synchronous path and does not depend on this toggle.'}
             </div>
         </div>
     );
@@ -1659,6 +2350,7 @@ function CompanyTimezoneEditor() {
 // ── Broadcast Section ──────────────────────────
 function BroadcastSection() {
     const { t } = useTranslation();
+    const toast = useToast();
     const [title, setTitle] = useState('');
     const [body, setBody] = useState('');
     const [sendEmail, setSendEmail] = useState(false);
@@ -1678,7 +2370,7 @@ function BroadcastSection() {
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
-                alert(err.detail || 'Failed to send broadcast');
+                toast.error('广播发送失败', { details: String(err.detail || `HTTP ${res.status}`) });
                 setSending(false);
                 return;
             }
@@ -1692,7 +2384,7 @@ function BroadcastSection() {
             setBody('');
             setSendEmail(false);
         } catch (e: any) {
-            alert(e.message || 'Failed');
+            toast.error('广播发送失败', { details: String(e?.message || e) });
         }
         setSending(false);
     };
@@ -1749,12 +2441,459 @@ function BroadcastSection() {
 }
 
 
-// ─── Identity Providers Tab ──────────────────────────
+// ─── OKR Tab ──────────────────────────────────────────
+function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
+    const qc = useQueryClient();
+    const dialog = useDialog();
+    const { i18n } = useTranslation();
+    // Derive language from i18n — same pattern as OKR.tsx
+    const zh = i18n.language?.startsWith('zh');
+    const okrSaveTimerRef = useRef<number | null>(null);
+    const [okrSaveState, setOkrSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [okrSaveError, setOkrSaveError] = useState('');
+    const [dailyTestState, setDailyTestState] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+    const [dailyTestMessage, setDailyTestMessage] = useState('');
+
+    const { data: settings, isLoading } = useQuery({
+        queryKey: ['okr-settings', tenantId],
+        queryFn: () => fetchJson<any>('/okr/settings')
+    });
+    const { data: tenantInfo } = useQuery({
+        queryKey: ['tenant-timezone', tenantId],
+        queryFn: () => fetchJson<any>(`/tenants/${tenantId}`),
+        enabled: !!tenantId,
+    });
+    const updateSettings = useMutation({
+        mutationFn: (data: any) => fetchJson('/okr/settings', { method: 'PUT', body: JSON.stringify(data) }),
+        onSuccess: () => {
+            qc.invalidateQueries({ queryKey: ['okr-settings'] });
+            setOkrSaveState('saved');
+            if (okrSaveTimerRef.current) window.clearTimeout(okrSaveTimerRef.current);
+            okrSaveTimerRef.current = window.setTimeout(() => {
+                setOkrSaveState('idle');
+                okrSaveTimerRef.current = null;
+            }, 1800);
+        },
+        onError: (error: any) => {
+            setOkrSaveState('error');
+            setOkrSaveError(error?.message || (zh ? '保存失败，请重试' : 'Save failed, please retry'));
+        },
+    });
+
+    useEffect(() => () => {
+        if (okrSaveTimerRef.current) window.clearTimeout(okrSaveTimerRef.current);
+    }, []);
+
+    const saveOkrSettings = (nextSettings: any) => {
+        if (okrSaveTimerRef.current) {
+            window.clearTimeout(okrSaveTimerRef.current);
+            okrSaveTimerRef.current = null;
+        }
+        setOkrSaveError('');
+        setOkrSaveState('saving');
+        updateSettings.mutate(nextSettings);
+    };
+
+    const runDailyCollectionTest = async () => {
+        setDailyTestState('running');
+        setDailyTestMessage('');
+        try {
+            const result = await fetchJson<any>('/okr/trigger-daily-collection', { method: 'POST' });
+            setDailyTestState('success');
+            setDailyTestMessage(
+                result?.message || (zh ? '测试收集已触发。' : 'Daily collection test triggered.')
+            );
+            qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
+        } catch (error: any) {
+            setDailyTestState('error');
+            setDailyTestMessage(error?.message || (zh ? '测试触发失败，请重试。' : 'Failed to trigger the test collection.'));
+        }
+    };
+
+    // Fetch members-without-okr to get okr_agent_id and company_okr_exists for the guidance card
+    const { data: membersData } = useQuery({
+        queryKey: ['okr-members-without-okr-settings', tenantId],
+        queryFn: () => fetchJson<any>('/okr/members-without-okr'),
+        enabled: !!settings?.enabled,
+        retry: false,
+    });
+
+    if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
+    const s = settings || { enabled: false, first_enabled_at: null, daily_report_enabled: false, daily_report_time: '18:00', daily_report_skip_non_workdays: true, weekly_report_enabled: false, weekly_report_day: 0, period_frequency: 'quarterly', period_length_days: null, period_frequency_locked: false };
+    const periodFrequencyLocked = !!s.period_frequency_locked || !!s.first_enabled_at;
+    const effectiveTimezone = tenantInfo?.timezone || 'UTC';
+
+    // Primary source: /settings now embeds okr_agent_id directly.
+    // Fallback to members-without-okr response for backward compat.
+    const okrAgentId: string | null = settings?.okr_agent_id ?? membersData?.okr_agent_id ?? null;
+    const companyOkrExists = membersData?.company_okr_exists ?? false;
+
+    return (
+        <div style={{ maxWidth: '800px' }}>
+            <div className="card" style={{ marginBottom: '24px' }}>
+                {/* Toggle row */}
+                <div style={{ padding: '20px', borderBottom: s.enabled ? '1px solid var(--border-subtle)' : 'none' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                            <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', marginBottom: '4px' }}>
+                                {zh ? 'OKR 系统开关' : 'OKR System'}
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                {zh
+                                    ? '启用后，组织内成员和数字员工均可使用 OKR 功能管理目标。Agent 将主动跟进并报告进展。'
+                                    : 'When enabled, all members and AI agents in the organization can use OKR to manage objectives. The OKR Agent will proactively track and report progress.'
+                                }
+                            </div>
+                        </div>
+                        {/* Wider toggle so the knob has comfortable room */}
+                        <label style={{ position: 'relative', display: 'inline-block', width: '52px', height: '28px', flexShrink: 0 }}>
+                            <input
+                                type="checkbox"
+                                checked={s.enabled}
+                                onChange={(e) => saveOkrSettings({ ...s, enabled: e.target.checked })}
+                                style={{ opacity: 0, width: 0, height: 0 }}
+                            />
+                            <span style={{
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '28px', cursor: 'pointer',
+                                background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)', transition: '0.2s'
+                            }}>
+                                <span style={{
+                                    position: 'absolute', left: s.enabled ? '26px' : '2px', top: '2px', width: '24px', height: '24px',
+                                    borderRadius: '50%', background: '#fff', transition: '0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+                                }} />
+                            </span>
+                        </label>
+                    </div>
+                    {!s.enabled && !periodFrequencyLocked && (
+                        <div style={{ marginTop: '20px' }}>
+                            <div style={{ fontWeight: 500, marginBottom: '8px', fontSize: '13px' }}>
+                                {zh ? '首次启用前选择 OKR 周期' : 'Choose OKR cadence before first enablement'}
+                            </div>
+                            <div style={{ marginBottom: '10px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5, maxWidth: '560px' }}>
+                                {zh
+                                    ? '请选择季度或月度。首次启用 OKR 后，周期频率将被锁定，避免历史 OKR 和报表口径混乱。'
+                                    : 'Choose quarterly or monthly. After OKR is enabled for the first time, this cadence will be locked to keep history and reports consistent.'}
+                            </div>
+                            <select
+                                className="form-input"
+                                value={s.period_frequency}
+                                onChange={(e) => saveOkrSettings({ ...s, period_frequency: e.target.value })}
+                                style={{ maxWidth: '300px', cursor: 'pointer' }}
+                            >
+                                <option value="quarterly">{zh ? '按季度' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月' : 'Monthly'}</option>
+                            </select>
+                        </div>
+                    )}
+                </div>
+
+                {okrSaveState !== 'idle' && (
+                    <div
+                        style={{
+                            padding: '10px 20px 0',
+                            fontSize: '12px',
+                            color: okrSaveState === 'error'
+                                ? 'var(--danger, #dc2626)'
+                                : okrSaveState === 'saved'
+                                    ? 'var(--success, #16a34a)'
+                                    : 'var(--text-tertiary)',
+                        }}
+                    >
+                        {okrSaveState === 'saving' && (zh ? '正在保存 OKR 设置...' : 'Saving OKR settings...')}
+                        {okrSaveState === 'saved' && (zh ? 'OKR 设置已保存' : 'OKR settings saved')}
+                        {okrSaveState === 'error' && okrSaveError}
+                    </div>
+                )}
+
+                {s.enabled && (
+                    <div style={{ padding: '20px' }}>
+                        {/* Phase 1 Onboarding Guidance Card */}
+                        <div style={{
+                            marginBottom: '24px',
+                            padding: '16px 20px',
+                            borderRadius: '10px',
+                            background: companyOkrExists ? 'rgba(34,197,94,0.06)' : 'rgba(99,102,241,0.06)',
+                            border: `1px solid ${companyOkrExists ? 'rgba(34,197,94,0.2)' : 'rgba(99,102,241,0.2)'}`,
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
+                                {/* Status icon */}
+                                <div style={{
+                                    width: 36, height: 36, borderRadius: '8px', flexShrink: 0,
+                                    background: companyOkrExists ? 'rgba(34,197,94,0.15)' : 'rgba(99,102,241,0.12)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                }}>
+                                    {companyOkrExists ? (
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                            <polyline points="20 6 9 17 4 12"/>
+                                        </svg>
+                                    ) : (
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                                        </svg>
+                                    )}
+                                </div>
+
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{
+                                        fontWeight: 600, fontSize: '14px',
+                                        color: companyOkrExists ? '#22c55e' : 'var(--text-primary)',
+                                        marginBottom: '4px',
+                                    }}>
+                                        {companyOkrExists
+                                            ? (zh ? '公司 OKR 已设定' : 'Company OKR is set')
+                                            : (zh ? '第一步：设定公司 OKR' : 'Step 1: Set company OKR')
+                                        }
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                                        {companyOkrExists
+                                            ? (zh
+                                                ? '公司目标已记录到当前周期。你可以在 OKR 页面查看详情，或催促成员设定个人 OKR。'
+                                                : 'Company objectives are recorded for the current period. Visit the OKR page to view details or nudge members to set their individual OKRs.')
+                                            : (zh
+                                                ? '开启 OKR 后的第一步是让 OKR Agent 帮你记录公司的目标。点击右侧按钮，跳转到 OKR Agent 的对话页面，告诉它本周期公司的目标，它会帮你创建。'
+                                                : 'The first step after enabling OKR is to let the OKR Agent record your company objectives. Click the button to open a chat with the OKR Agent and describe your goals for this period.')
+                                        }
+                                    </div>
+                                </div>
+
+                                {/* Action button — links to OKR Agent chat (agent detail page at /agents/{id}) */}
+                                {okrAgentId ? (
+                                    <a
+                                        id="okr-chat-agent-btn"
+                                        href={`/agents/${okrAgentId}#chat`}
+                                        style={{
+                                            display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                            padding: '7px 14px', borderRadius: '6px',
+                                            background: companyOkrExists ? 'var(--bg-secondary)' : 'var(--accent-primary)',
+                                            color: companyOkrExists ? 'var(--text-secondary)' : '#fff',
+                                            border: companyOkrExists ? '1px solid var(--border-subtle)' : 'none',
+                                            fontSize: '12px', fontWeight: 500, textDecoration: 'none',
+                                            whiteSpace: 'nowrap', flexShrink: 0,
+                                            transition: 'opacity 0.15s',
+                                        }}
+                                    >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                        {companyOkrExists
+                                            ? (zh ? '继续和 OKR Agent 对话' : 'Chat with OKR Agent')
+                                            : (zh ? '前往 OKR Agent 对话' : 'Open OKR Agent Chat')
+                                        }
+                                    </a>
+                                ) : (
+                                    <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                        {zh ? 'OKR Agent 未找到' : 'OKR Agent not found'}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Sync Relationship Network */}
+                        <div style={{
+                            marginBottom: '24px',
+                            padding: '14px 18px',
+                            borderRadius: '8px',
+                            background: 'var(--bg-secondary)',
+                            border: '1px solid var(--border-subtle)',
+                            display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+                        }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '2px' }}>
+                                    {zh ? '同步关系网络' : 'Sync Relationship Network'}
+                                </div>
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                    {zh
+                                        ? '将组织架构中的成员和公司可见的 Agent 自动关联到 OKR Agent'
+                                        : 'Auto-link all org members and company-visible agents to OKR Agent'}
+                                </div>
+                            </div>
+                            <button
+                                id="okr-sync-relationships-btn"
+                                onClick={async () => {
+                                    try {
+                                        const token = localStorage.getItem('token');
+                                        const res = await fetch('/api/okr/sync-relationships', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        });
+                                        if (res.ok) {
+                                            await dialog.alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!', {
+                                                type: 'success',
+                                                title: zh ? '同步完成' : 'Sync Complete',
+                                            });
+                                            qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
+                                        } else {
+                                            const err = await res.json().catch(() => ({}));
+                                            await dialog.alert(zh ? '关系网络同步失败' : 'Relationship sync failed', {
+                                                type: 'error',
+                                                details: String(err.detail || res.status),
+                                            });
+                                        }
+                                    } catch (e) {
+                                        await dialog.alert(zh ? '同步失败，请重试' : 'Sync failed, please retry', {
+                                            type: 'error',
+                                            details: String((e as any)?.message || e),
+                                        });
+                                    }
+                                }}
+                                style={{
+                                    padding: '6px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+                                    background: 'var(--accent-primary)', color: '#fff', border: 'none', cursor: 'pointer',
+                                    whiteSpace: 'nowrap', flexShrink: 0,
+                                }}
+                            >
+                                {zh ? '立即同步' : 'Sync Now'}
+                            </button>
+                        </div>
+
+                        {/* Period preference */}
+                        <div style={{ marginBottom: '24px' }}>
+                            <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
+                                {zh ? '周期偏好' : 'Period Preference'}
+                            </div>
+                            <select
+                                className="form-input"
+                                value={s.period_frequency}
+                                disabled={periodFrequencyLocked}
+                                title={periodFrequencyLocked
+                                    ? (zh ? 'OKR 周期已锁定，不能修改' : 'OKR cadence is locked and cannot be changed')
+                                    : undefined}
+                                onChange={(e) => saveOkrSettings({ ...s, period_frequency: e.target.value })}
+                                style={{
+                                    maxWidth: '300px',
+                                    opacity: periodFrequencyLocked ? 0.65 : 1,
+                                    cursor: periodFrequencyLocked ? 'not-allowed' : 'pointer',
+                                }}
+                            >
+                                <option value="quarterly">{zh ? '按季度' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月' : 'Monthly'}</option>
+                            </select>
+                            {periodFrequencyLocked && (
+                                <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
+                                    {zh
+                                        ? 'OKR 周期在首次启用后会被锁定，以保证历史 OKR、报表和催办逻辑使用同一套口径。'
+                                        : 'The OKR cadence is locked after first enablement so history, reports, and nudges keep one consistent meaning.'}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Daily report */}
+                        <div style={{ marginBottom: '24px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={s.daily_report_enabled}
+                                    onChange={(e) => saveOkrSettings({ ...s, daily_report_enabled: e.target.checked })}
+                                />
+                                <div>
+                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>
+                                        {zh ? '启用成员日报收集' : 'Enable Member Daily Collection'}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {zh
+                                            ? '成员只提交日报。公司日报会在次日 09:00 自动生成，周报和月报也会自动汇总。'
+                                            : 'Members only submit daily reports. The company daily report is generated at 09:00 the next day, and weekly/monthly summaries are generated automatically.'
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                            {s.daily_report_enabled && (
+                                <div style={{ marginLeft: '28px', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={s.daily_report_skip_non_workdays ?? true}
+                                            onChange={(e) => saveOkrSettings({ ...s, daily_report_skip_non_workdays: e.target.checked })}
+                                        />
+                                        {zh ? '自动跳过休息日' : 'Skip non-workdays automatically'}
+                                    </label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        {zh ? '开始收集时间:' : 'Collection time:'}
+                                    </div>
+                                    <input
+                                        type="time"
+                                        className="form-input"
+                                        value={s.daily_report_time}
+                                        onChange={(e) => saveOkrSettings({ ...s, daily_report_time: e.target.value })}
+                                        style={{ width: '120px' }}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={runDailyCollectionTest}
+                                        disabled={dailyTestState === 'running'}
+                                        style={{ padding: '6px 12px', fontSize: '12px' }}
+                                    >
+                                        {dailyTestState === 'running'
+                                            ? (zh ? '测试中...' : 'Testing...')
+                                            : (zh ? '立即测试收集' : 'Test Collection Now')}
+                                    </button>
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6, maxWidth: '560px' }}>
+                                        {zh
+                                            ? `当前按公司时区 ${effectiveTimezone} 执行定时收集。`
+                                            : `Scheduled collection currently follows the company timezone: ${effectiveTimezone}.`}
+                                    </div>
+                                    {effectiveTimezone === 'UTC' && (
+                                        <div style={{ fontSize: '12px', color: 'var(--warning, #d97706)', lineHeight: 1.6, maxWidth: '560px' }}>
+                                            {zh
+                                                ? '你当前公司时区还是 UTC。如果你希望按中国时间触发，请先到“公司信息”里把国家/地区调整为中国或把公司时区改成 Asia/Shanghai。'
+                                                : 'Your company timezone is still UTC. If you expect China local time, update Company Info to China / Asia/Shanghai first.'}
+                                        </div>
+                                    )}
+                                    {dailyTestState !== 'idle' && (
+                                        <div
+                                            style={{
+                                                fontSize: '12px',
+                                                color: dailyTestState === 'error'
+                                                    ? 'var(--danger, #dc2626)'
+                                                    : dailyTestState === 'success'
+                                                        ? 'var(--success, #16a34a)'
+                                                        : 'var(--text-tertiary)',
+                                                lineHeight: 1.6,
+                                                maxWidth: '560px',
+                                            }}
+                                        >
+                                            {dailyTestMessage || (dailyTestState === 'running'
+                                                ? (zh ? '正在触发一次测试收集...' : 'Triggering a test collection...')
+                                                : '')}
+                                        </div>
+                                    )}
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6, maxWidth: '560px' }}>
+                                        {zh
+                                            ? '每天到这个时间后，OKR Agent 会开始向成员收集当天日报。公司日报固定在次日 09:00 生成；公司周报固定在周一 09:00 生成；公司月报固定在每月 1 日 09:00 生成。'
+                                            : 'At this time each day, the OKR Agent starts collecting member daily reports. The company daily report is generated at 09:00 the next day, the weekly report at 09:00 every Monday, and the monthly report at 09:00 on the 1st of each month.'}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
+    const dialog = useDialog();
+    const toast = useToast();
     const qc = useQueryClient();
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites'>('info');
+    type TabKey = 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr';
+    const VALID_TABS: TabKey[] = ['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'];
+    const getTabFromHash = (): TabKey => {
+        const hash = window.location.hash.replace('#', '') as TabKey;
+        return VALID_TABS.includes(hash) ? hash : 'info';
+    };
+    const [activeTab, setActiveTab] = useState<TabKey>(getTabFromHash);
+
+    // Sync hash ↔ activeTab: hashchange navigation (back/forward) updates state
+    useEffect(() => {
+        const handler = () => setActiveTab(getTabFromHash());
+        window.addEventListener('hashchange', handler);
+        return () => window.removeEventListener('hashchange', handler);
+    }, []);
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -1771,8 +2910,8 @@ export default function EnterpriseSettings() {
     // Tenant quota defaults
     const [quotaForm, setQuotaForm] = useState({
         default_message_limit: 50, default_message_period: 'permanent',
-        default_max_agents: 2, default_agent_ttl_hours: 48,
-        default_max_llm_calls_per_day: 100, min_heartbeat_interval_minutes: 120,
+        default_max_agents: 2, default_agent_ttl_hours: 0,
+        default_max_llm_calls_per_day: 1000, min_heartbeat_interval_minutes: 120,
         default_max_triggers: 20, min_poll_interval_floor: 5, max_webhook_rate_ceiling: 5,
     });
     const [quotaSaving, setQuotaSaving] = useState(false);
@@ -1789,7 +2928,7 @@ export default function EnterpriseSettings() {
         try {
             await fetchJson('/enterprise/tenant-quotas', { method: 'PATCH', body: JSON.stringify(quotaForm) });
             setQuotaSaved(true); setTimeout(() => setQuotaSaved(false), 2000);
-        } catch (e) { alert('Failed to save'); }
+        } catch (e: any) { toast.error('保存失败', { details: String(e?.message || e) }); }
         setQuotaSaving(false);
     };
     const [companyIntro, setCompanyIntro] = useState('');
@@ -1850,6 +2989,7 @@ export default function EnterpriseSettings() {
     const [mcpServerSaving, setMcpServerSaving] = useState(false);
     const [editingToolId, setEditingToolId] = useState<string | null>(null);
     const [editingConfig, setEditingConfig] = useState<Record<string, any>>({});
+    const [showAdvancedToolConfig, setShowAdvancedToolConfig] = useState(false);
 
     const [configCategory, setConfigCategory] = useState<string | null>(null);
 
@@ -1862,6 +3002,19 @@ export default function EnterpriseSettings() {
                 { key: 'os_type', label: 'Cloud Computer OS', type: 'select', default: 'windows', options: [{ value: 'linux', label: 'Linux' }, { value: 'windows', label: 'Windows' }] },
             ],
         },
+    };
+    const GLOBAL_CATEGORY_CONFIG_PRIMARY_TOOL: Record<string, string> = {
+        agentbay: 'agentbay_browser_navigate',
+    };
+
+    const applyConfigDefaults = (fields: any[] = [], config: Record<string, any> = {}) => {
+        const next = { ...config };
+        for (const field of fields) {
+            if (field.default !== undefined && (next[field.key] === undefined || next[field.key] === null || next[field.key] === '')) {
+                next[field.key] = field.default;
+            }
+        }
+        return next;
     };
 
     // Labels for tool categories (mirrors AgentDetail getCategoryLabels)
@@ -1880,8 +3033,100 @@ export default function EnterpriseSettings() {
         general: t('agent.toolCategories.general'),
         agentbay: t('agent.toolCategories.agentbay', 'AgentBay'),
     };
+    const categoryDescriptions: Record<string, string> = {
+        agentbay: 'Browser and cloud computer automation',
+        file: 'Read, write, convert, and manage workspace files',
+        communication: 'Messages and cross-channel collaboration',
+        search: 'Web and knowledge search tools',
+        code: 'Code execution and development utilities',
+        aware: 'Triggers, reminders, and awareness workflows',
+        email: 'Email reading and sending tools',
+        feishu: 'Feishu / Lark messaging and collaboration',
+        okr: 'Objectives, key results, and progress reporting',
+        social: 'Social publishing and community workflows',
+        discovery: 'Tool and capability discovery',
+        custom: 'Company-added or MCP tools',
+        general: 'General purpose tools',
+    };
+    const renderCategoryIcon = (category: string, size = 15) => {
+        const style = { color: 'var(--text-tertiary)' };
+        switch (category) {
+            case 'agentbay': return <IconBrowser size={size} stroke={1.8} style={style} />;
+            case 'file': return <IconFileText size={size} stroke={1.8} style={style} />;
+            case 'communication':
+            case 'feishu':
+            case 'email':
+            case 'social':
+                return <IconMessageCircle size={size} stroke={1.8} style={style} />;
+            case 'search':
+            case 'discovery':
+                return <IconSearch size={size} stroke={1.8} style={style} />;
+            case 'code': return <IconTerminal2 size={size} stroke={1.8} style={style} />;
+            case 'aware': return <IconClock size={size} stroke={1.8} style={style} />;
+            case 'custom': return <IconSettings size={size} stroke={1.8} style={style} />;
+            default: return <IconTools size={size} stroke={1.8} style={style} />;
+        }
+    };
+    const mcpToolGroupKey = (tool: any) => {
+        const serverName = String(tool.mcp_server_name || '').trim();
+        return tool.type === 'mcp' && serverName
+            ? `mcp:${serverName.toLowerCase()}`
+            : (tool.category || 'general');
+    };
+    const getToolGroupMeta = (groupKey: string, toolsInGroup: any[]) => {
+        const first = toolsInGroup.find((tool: any) => tool.type === 'mcp' && tool.mcp_server_name) || toolsInGroup[0];
+        if (groupKey.startsWith('mcp:') && first?.mcp_server_name) {
+            return {
+                label: first.mcp_server_name,
+                description: t('agent.tools.mcpGroupDescription', 'Tools from {{name}}', { name: first.mcp_server_name }),
+                iconCategory: 'custom',
+                configCategory: first.category || 'custom',
+            };
+        }
+        return {
+            label: categoryLabels[groupKey] || groupKey,
+            description: categoryDescriptions[groupKey] || 'Tools in this category',
+            iconCategory: groupKey,
+            configCategory: groupKey,
+        };
+    };
+    const switchTrack = (enabled: boolean, mixed = false) => ({
+        position: 'absolute' as const,
+        inset: 0,
+        background: enabled ? 'var(--accent-primary)' : mixed ? 'var(--border-default)' : 'var(--bg-tertiary)',
+        borderRadius: '11px',
+        transition: 'background 0.2s',
+    });
+    const switchKnob = (enabled: boolean) => ({
+        position: 'absolute' as const,
+        left: enabled ? '20px' : '2px',
+        top: '2px',
+        width: '18px',
+        height: '18px',
+        background: '#fff',
+        borderRadius: '50%',
+        transition: 'left 0.2s',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
+    });
     const [toolsView, setToolsView] = useState<'global' | 'agent-installed'>('global');
     const [agentInstalledTools, setAgentInstalledTools] = useState<any[]>([]);
+    const [toolSearch, setToolSearch] = useState('');
+    const [toolStatusFilter, setToolStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'default' | 'configured'>('all');
+    const [expandedToolCategories, setExpandedToolCategories] = useState<Set<string>>(() => new Set());
+    const [expandedAgentInstalledGroups, setExpandedAgentInstalledGroups] = useState<Set<string>>(() => new Set());
+    const hasMeaningfulConfigValue = (value: any): boolean => {
+        if (value == null) return false;
+        if (typeof value === 'string') return value.trim().length > 0;
+        if (typeof value === 'number') return Number.isFinite(value);
+        if (typeof value === 'boolean') return value;
+        if (Array.isArray(value)) return value.some(hasMeaningfulConfigValue);
+        if (typeof value === 'object') return Object.values(value).some(hasMeaningfulConfigValue);
+        return false;
+    };
+    const hasMeaningfulConfig = (config?: Record<string, any> | null): boolean => {
+        if (!config) return false;
+        return Object.values(config).some(hasMeaningfulConfigValue);
+    };
     const loadAllTools = async () => {
         const tid = selectedTenantId;
         const data = await fetchJson<any[]>(`/tools${tid ? `?tenant_id=${tid}` : ''}`);
@@ -1892,7 +3137,10 @@ export default function EnterpriseSettings() {
             const tid = selectedTenantId;
             const data = await fetchJson<any[]>(`/tools/agent-installed${tid ? `?tenant_id=${tid}` : ''}`);
             setAgentInstalledTools(data);
-        } catch { }
+        } catch (error) {
+            console.warn('[EnterpriseTools] Failed to load agent-installed tools', error);
+            setAgentInstalledTools([]);
+        }
     };
     useEffect(() => { if (activeTab === 'tools') { loadAllTools(); loadAgentInstalledTools(); } }, [activeTab, selectedTenantId]);
 
@@ -1970,6 +3218,23 @@ export default function EnterpriseSettings() {
         mutationFn: ({ id, data }: { id: string; data: any }) => fetchJson(`/enterprise/llm-models/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
         onSuccess: () => { qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] }); setShowAddModel(false); setEditingModelId(null); },
     });
+    // Tenant default model — for rendering a "默认" badge in the model list.
+    const { data: tenantForDefault, refetch: refetchTenantForDefault } = useQuery({
+        queryKey: ['tenant-default-model', selectedTenantId],
+        queryFn: () => fetchJson<{ default_model_id: string | null }>(
+            selectedTenantId ? `/tenants/${selectedTenantId}` : '/tenants/me'
+        ),
+        enabled: activeTab === 'llm',
+    });
+    const setDefaultModel = useMutation({
+        mutationFn: (modelId: string) => fetchJson(`/enterprise/llm-models/${modelId}/set-default`, { method: 'POST' }),
+        onSuccess: () => {
+            refetchTenantForDefault();
+            qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
+            qc.invalidateQueries({ queryKey: ['agents'] });
+            qc.invalidateQueries({ queryKey: ['agent'] });
+        },
+    });
     const deleteModel = useMutation({
         mutationFn: async ({ id, force = false }: { id: string; force?: boolean }) => {
             const url = force ? `/enterprise/llm-models/${id}?force=true` : `/enterprise/llm-models/${id}`;
@@ -1980,8 +3245,8 @@ export default function EnterpriseSettings() {
             if (res.status === 409) {
                 const data = await res.json();
                 const agents = data.detail?.agents || [];
-                const msg = `This model is used by ${agents.length} agent(s):\n\n${agents.join(', ')}\n\nDelete anyway? (their model config will be cleared)`;
-                if (confirm(msg)) {
+                const msg = `该模型正在被 ${agents.length} 个数字员工使用：\n\n${agents.join(', ')}\n\n仍要删除吗？（对应的模型配置会被清空）`;
+                if (await dialog.confirm(msg, { title: '删除模型', danger: true, confirmLabel: '强制删除' })) {
                     // Retry with force
                     const r2 = await fetch(`/api/enterprise/llm-models/${id}?force=true`, {
                         method: 'DELETE',
@@ -2038,12 +3303,22 @@ export default function EnterpriseSettings() {
                 </div>
 
                 <div className="tabs">
-                    {(['info', 'llm', 'tools', 'skills', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
-                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
-                            {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : t(`enterprise.tabs.${tab}`)}
+                    {(['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
+                        <div
+                            key={tab}
+                            className={`tab ${activeTab === tab ? 'active' : ''}`}
+                            onClick={() => {
+                                // Update URL hash so each tab has a bookmarkable address
+                                window.location.hash = tab;
+                                setActiveTab(tab);
+                            }}
+                        >
+                            {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : tab === 'okr' ? t('nav.okr', 'OKR') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}
                 </div>
+
+                {activeTab === 'okr' && <OkrTab tenantId={selectedTenantId} t={t} />}
 
                 {/* ── LLM Model Pool ── */}
                 {activeTab === 'llm' && (
@@ -2155,11 +3430,11 @@ export default function EnterpriseSettings() {
                                                 if (btn) { btn.textContent = t('enterprise.llm.testSuccess', { latency: result.latency_ms }); btn.style.color = 'var(--success)'; }
                                                 setTimeout(() => { if (btn) { btn.textContent = origText; btn.style.color = ''; } }, 3000);
                                             } else {
-                                                alert(t('enterprise.llm.testFailed', { error: result.error || 'Unknown error', latency: result.latency_ms }));
+                                                await dialog.alert(t('enterprise.llm.testFailedShort', '连通性测试失败'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(result.error || 'Unknown error') });
                                                 if (btn) btn.textContent = origText;
                                             }
                                         } catch (e: any) {
-                                            alert(t('enterprise.llm.testError', { message: e.message }));
+                                            await dialog.alert(t('enterprise.llm.testErrorShort', '连通性测试出错'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(e?.message || e) });
                                             if (btn) btn.textContent = origText;
                                         }
                                     }}>{t('enterprise.llm.test')}</button>
@@ -2265,11 +3540,11 @@ export default function EnterpriseSettings() {
                                                             if (btn) { btn.textContent = t('enterprise.llm.testSuccess', { latency: result.latency_ms }); btn.style.color = 'var(--success)'; }
                                                             setTimeout(() => { if (btn) { btn.textContent = origText; btn.style.color = ''; } }, 3000);
                                                         } else {
-                                                            alert(t('enterprise.llm.testFailed', { error: result.error || 'Unknown error', latency: result.latency_ms }));
+                                                            await dialog.alert(t('enterprise.llm.testFailedShort', '连通性测试失败'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(result.error || 'Unknown error') });
                                                             if (btn) btn.textContent = origText;
                                                         }
                                                     } catch (e: any) {
-                                                        alert(t('enterprise.llm.testError', { message: e.message }));
+                                                        await dialog.alert(t('enterprise.llm.testErrorShort', '连通性测试出错'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(e?.message || e) });
                                                         if (btn) btn.textContent = origText;
                                                     }
                                                 }}>{t('enterprise.llm.test')}</button>
@@ -2324,11 +3599,18 @@ export default function EnterpriseSettings() {
                                                     }} />
                                                 </button>
                                                 {m.supports_vision && <span className="badge" style={{ background: 'rgba(99,102,241,0.15)', color: 'rgb(99,102,241)', fontSize: '10px' }}>Vision</span>}
+                                                {tenantForDefault?.default_model_id === m.id ? (
+                                                    <span className="badge" style={{ background: 'rgba(34,197,94,0.15)', color: 'rgb(34,197,94)', fontSize: '10px' }}>{t('enterprise.llm.defaultBadge', '默认')}</span>
+                                                ) : m.enabled ? (
+                                                    <button className="btn btn-ghost" style={{ fontSize: '12px' }} onClick={() => setDefaultModel.mutate(m.id)} title={t('enterprise.llm.setAsDefaultTitle', 'Set as default for new agents')}>
+                                                        {t('enterprise.llm.setAsDefault', '设为默认')}
+                                                    </button>
+                                                ) : null}
                                                 <button className="btn btn-ghost" onClick={() => {
                                                     setEditingModelId(m.id);
                                                     setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: m.api_key_masked || '', supports_vision: m.supports_vision || false, max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '', request_timeout: m.request_timeout ? String(m.request_timeout) : '', temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '' });
                                                     setShowAddModel(true);
-                                                }} style={{ fontSize: '12px' }}>✏️ {t('enterprise.tools.edit')}</button>
+                                                }} style={{ fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconEdit size={13} stroke={1.8} /> {t('enterprise.tools.edit')}</button>
                                                 <button className="btn btn-ghost" onClick={() => deleteModel.mutate({ id: m.id })} style={{ color: 'var(--error)' }}>{t('common.delete')}</button>
                                             </div>
                                         </div>
@@ -2407,9 +3689,10 @@ export default function EnterpriseSettings() {
                                         </span>
                                         <span style={{
                                             padding: '1px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 500,
+                                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                                             background: isBg ? 'rgba(99,102,241,0.12)' : 'rgba(34,197,94,0.12)',
                                             color: isBg ? 'var(--accent-color)' : 'rgb(34,197,94)',
-                                        }}>{isBg ? '⚙️' : '👤'}</span>
+                                        }}>{isBg ? <IconSettings size={12} stroke={1.8} /> : <IconUser size={12} stroke={1.8} />}</span>
                                         <span style={{ flex: 1, fontWeight: 500 }}>{log.action}</span>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>{log.agent_id?.slice(0, 8) || '-'}</span>
                                     </div>
@@ -2430,20 +3713,16 @@ export default function EnterpriseSettings() {
                 {/* ── Company Management ── */}
                 {activeTab === 'info' && (
                     <div>
-
-                        {/* ── 0. Company Name ── */}
-                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyName.title', 'Company Name')}</h3>
+                        <CompanyLogoEditor key={`logo-${selectedTenantId}`} />
                         <CompanyNameEditor key={`name-${selectedTenantId}`} />
-
-                        {/* ── 0.5. Company Timezone ── */}
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
-
-                        {/* ── 2. Company Intro ── */}
-                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
-                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                            {t('enterprise.companyIntro.description', 'Describe your company\'s mission, products, and culture. This information is included in every agent conversation as context.')}
-                        </p>
                         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+                            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                                {t('enterprise.companyIntro.title', 'Company Intro')}
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                {t('enterprise.companyIntro.description', 'Describe your company\'s mission, products, and culture. This information is included in every agent conversation as context.')}
+                            </div>
                             <textarea
                                 className="form-input"
                                 value={companyIntro}
@@ -2459,118 +3738,23 @@ export default function EnterpriseSettings() {
                                 <button className="btn btn-primary" onClick={saveCompanyIntro} disabled={companyIntroSaving}>
                                     {companyIntroSaving ? t('common.loading') : t('common.save', 'Save')}
                                 </button>
-                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ {t('enterprise.config.saved', 'Saved')}</span>}
-                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
-                                    💡 {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
+                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconCheck size={13} stroke={2} /> {t('enterprise.config.saved', 'Saved')}</span>}
+                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                    <IconBulb size={13} stroke={1.8} /> {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
                                 </span>
                             </div>
                         </div>
-
-                        {/* ── 2. Company Knowledge Base ── */}
-                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.kb.title')}</h3>
-                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                            {t('enterprise.kb.description', 'Shared files accessible to all agents via enterprise_info/ directory.')}
-                        </p>
                         <div className="card" style={{ marginBottom: '24px', padding: '16px' }}>
+                            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                                {t('enterprise.kb.title')}
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                {t('enterprise.kb.description', 'Shared files accessible to all agents via enterprise_info/ directory.')}
+                            </div>
                             <EnterpriseKBBrowser onRefresh={() => setInfoRefresh((v: number) => v + 1)} refreshKey={infoRefresh} />
                         </div>
-
-
-
-                        {/* ── Theme Color ── */}
                         <ThemeColorPicker />
-
-                        {/* ── Broadcast ── */}
-                        <BroadcastSection />
-
-                        {/* ── A2A Async Communication (Beta) ── */}
-                        <div style={{ marginTop: '24px', marginBottom: '24px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                                <h3 style={{ margin: 0 }}>
-                                    {t('enterprise.a2aAsync.title', 'Agent-to-Agent Async Communication')}
-                                </h3>
-                                <span style={{
-                                    fontSize: '11px', padding: '2px 8px', borderRadius: '10px',
-                                    background: 'var(--warning-bg, #fef3cd)', color: 'var(--warning-text, #856404)',
-                                    fontWeight: 500, letterSpacing: '0.3px',
-                                }}>
-                                    BETA
-                                </span>
-                            </div>
-                            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px', lineHeight: 1.6 }}>
-                                {t('enterprise.a2aAsync.description',
-                                    'Enable agents to communicate asynchronously with three modes: notify (one-way announcement), task_delegate (delegate work and get results back), and consult (synchronous question). When disabled, all agent-to-agent messages use synchronous consult mode — the same behavior as before this feature was introduced.'
-                                )}
-                            </p>
-                            <div className="card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '16px' }}>
-                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                    <input type="checkbox"
-                                        checked={!!currentTenant?.a2a_async_enabled}
-                                        onChange={async (e) => {
-                                            const wantEnable = e.target.checked;
-                                            if (wantEnable) {
-                                                const confirmed = window.confirm(
-                                                    t('enterprise.a2aAsync.enableWarning',
-                                                        [
-                                                            '⚠️ You are about to enable the A2A Async Communication feature (Beta).',
-                                                            '',
-                                                            'This feature allows agents to communicate asynchronously via notify and task_delegate modes.',
-                                                            '',
-                                                            'Known potential issues:',
-                                                            '• Agent replies may contain internal technical terms (trigger names, focus items, etc.)',
-                                                            '• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting',
-                                                            '• Token consumption will increase because each async message triggers a separate agent session',
-                                                            '• Agent loops may occur if triggers are not properly configured',
-                                                            '',
-                                                            'If you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.',
-                                                            '',
-                                                            'Are you sure you want to enable this feature?'
-                                                        ].join('\n')
-                                                    )
-                                                );
-                                                if (!confirmed) return;
-                                            }
-                                            try {
-                                                await fetchJson(`/tenants/${selectedTenantId}`, {
-                                                    method: 'PUT',
-                                                    body: JSON.stringify({ a2a_async_enabled: wantEnable }),
-                                                });
-                                                qc.invalidateQueries({ queryKey: ['tenant', selectedTenantId] });
-                                            } catch (err: any) {
-                                                alert(err.message || 'Update failed');
-                                            }
-                                        }}
-                                        style={{ opacity: 0, width: 0, height: 0 }}
-                                    />
-                                    <span style={{
-                                        position: 'absolute', inset: 0,
-                                        background: currentTenant?.a2a_async_enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                        borderRadius: '11px', transition: 'background 0.2s',
-                                    }}>
-                                        <span style={{
-                                            position: 'absolute',
-                                            left: currentTenant?.a2a_async_enabled ? '20px' : '2px',
-                                            top: '2px', width: '18px', height: '18px',
-                                            background: '#fff', borderRadius: '50%', transition: 'left 0.2s',
-                                        }} />
-                                    </span>
-                                </label>
-                                <div>
-                                    <span style={{ fontSize: '13px', fontWeight: 500 }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabled', 'Enabled')
-                                            : t('enterprise.a2aAsync.disabled', 'Disabled')
-                                        }
-                                    </span>
-                                    <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', margin: '2px 0 0 0' }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabledHint', 'Agents can use notify, task_delegate, and consult modes.')
-                                            : t('enterprise.a2aAsync.disabledHint', 'All agent messages use synchronous consult mode.')
-                                        }
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
+                        <A2AAsyncToggle key={`a2a-${selectedTenantId}`} />
 
                         {/* ── Danger Zone: Delete Company ── */}
                         <div style={{ marginTop: '32px', padding: '16px', border: '1px solid var(--status-error, #e53e3e)', borderRadius: '8px' }}>
@@ -2581,8 +3765,15 @@ export default function EnterpriseSettings() {
                             <button
                                 className="btn"
                                 onClick={async () => {
-                                    const name = document.querySelector<HTMLInputElement>('.company-name-input')?.value || selectedTenantId;
-                                    if (!confirm(t('enterprise.deleteCompanyConfirm', 'Are you sure you want to delete this company and ALL its data? This cannot be undone.'))) return;
+                                    const ok = await dialog.confirm(
+                                        t('enterprise.deleteCompanyConfirm', 'Are you sure you want to delete this company and ALL its data? This cannot be undone.'),
+                                        {
+                                            title: t('enterprise.deleteCompanyTitle', 'Delete company'),
+                                            danger: true,
+                                            confirmLabel: t('enterprise.deleteCompanyConfirmButton', 'Permanently delete'),
+                                        },
+                                    );
+                                    if (!ok) return;
                                     try {
                                         const res = await fetchJson<any>(`/tenants/${selectedTenantId}`, { method: 'DELETE' });
                                         // Switch to fallback tenant
@@ -2592,7 +3783,7 @@ export default function EnterpriseSettings() {
                                         window.dispatchEvent(new StorageEvent('storage', { key: 'current_tenant_id', newValue: fallbackId }));
                                         qc.invalidateQueries({ queryKey: ['tenants'] });
                                     } catch (e: any) {
-                                        alert(e.message || 'Delete failed');
+                                        await dialog.alert(t('enterprise.deleteCompanyFailed', 'Failed to delete company'), { type: 'error', details: String(e?.message || e) });
                                     }
                                 }}
                                 style={{
@@ -2647,8 +3838,27 @@ export default function EnterpriseSettings() {
                                 </div>
                                 <div className="form-group">
                                     <label className="form-label">{t('enterprise.quotas.agentTTL')}</label>
-                                    <input className="form-input" type="number" min={1} value={quotaForm.default_agent_ttl_hours}
-                                        onChange={e => setQuotaForm({ ...quotaForm, default_agent_ttl_hours: Number(e.target.value) })} />
+                                    <select
+                                        className="form-input"
+                                        value={quotaForm.default_agent_ttl_hours > 0 ? 'custom' : 'permanent'}
+                                        onChange={e => setQuotaForm({
+                                            ...quotaForm,
+                                            default_agent_ttl_hours: e.target.value === 'permanent' ? 0 : 48,
+                                        })}
+                                    >
+                                        <option value="permanent">{t('enterprise.quotas.permanent')}</option>
+                                        <option value="custom">{t('enterprise.quotas.customHours', 'Custom hours')}</option>
+                                    </select>
+                                    {quotaForm.default_agent_ttl_hours > 0 && (
+                                        <input
+                                            className="form-input"
+                                            type="number"
+                                            min={1}
+                                            value={quotaForm.default_agent_ttl_hours}
+                                            onChange={e => setQuotaForm({ ...quotaForm, default_agent_ttl_hours: Number(e.target.value) })}
+                                            style={{ marginTop: '8px' }}
+                                        />
+                                    )}
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.quotas.agentAutoExpiry')}</div>
                                 </div>
                                 <div className="form-group">
@@ -2702,7 +3912,7 @@ export default function EnterpriseSettings() {
                                 <button className="btn btn-primary" onClick={saveQuotas} disabled={quotaSaving}>
                                     {quotaSaving ? t('common.loading') : t('common.save', 'Save')}
                                 </button>
-                                {quotaSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ Saved</span>}
+                                {quotaSaved && <span style={{ color: 'var(--success)', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconCheck size={13} stroke={2} /> Saved</span>}
                             </div>
                         </div>
                     </div>
@@ -2718,13 +3928,19 @@ export default function EnterpriseSettings() {
                 {activeTab === 'tools' && (
                     <div>
                         {/* Sub-tab pills */}
-                        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '8px' }}>
+                        <div className="tool-source-tabs enterprise-tool-source-tabs" role="tablist" aria-label={t('enterprise.tools.sourceTabs', 'Tool sources')}>
                             {([['global', t('enterprise.tools.globalTools')], ['agent-installed', t('enterprise.tools.agentInstalled')]] as const).map(([key, label]) => (
-                                <button key={key} onClick={() => { setToolsView(key as any); if (key === 'agent-installed') loadAgentInstalledTools(); }} style={{
-                                    padding: '4px 14px', borderRadius: '12px', fontSize: '12px', fontWeight: 500, cursor: 'pointer', border: 'none',
-                                    background: toolsView === key ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                    color: toolsView === key ? '#fff' : 'var(--text-secondary)', transition: 'all 0.15s',
-                                }}>{label}</button>
+                                <button
+                                    key={key}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={toolsView === key}
+                                    className={toolsView === key ? 'active' : ''}
+                                    onClick={() => { setToolsView(key as any); if (key === 'agent-installed') loadAgentInstalledTools(); }}
+                                >
+                                    <span>{label}</span>
+                                    <span className="tool-source-tab-count">{key === 'global' ? allTools.length : agentInstalledTools.length}</span>
+                                </button>
                             ))}
                         </div>
 
@@ -2735,38 +3951,104 @@ export default function EnterpriseSettings() {
                                 {agentInstalledTools.length === 0 ? (
                                     <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>{t('enterprise.tools.noAgentInstalledTools')}</div>
                                 ) : (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                        {agentInstalledTools.map((row: any) => (
-                                            <div key={row.agent_tool_id} className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px' }}>
-                                                <div style={{ flex: 1, minWidth: 0 }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                        <span style={{ fontWeight: 500, fontSize: '13px' }}>🔌 {row.tool_display_name}</span>
-                                                        {row.mcp_server_name && <span style={{ fontSize: '10px', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>}
-                                                    </div>
-                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                        🤖 {row.installed_by_agent_name || 'Unknown Agent'}
-                                                        {row.installed_at && <span> · {new Date(row.installed_at).toLocaleString()}</span>}
-                                                    </div>
-                                                </div>
-                                                <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={async () => {
-                                                    if (!confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }))) return;
-                                                    try {
-                                                        await fetchJson(`/tools/agent-tool/${row.agent_tool_id}`, { method: 'DELETE' });
-                                                    } catch {
-                                                        // Already deleted (e.g. removed via Global Tools) — just refresh
-                                                    }
-                                                    loadAgentInstalledTools();
-                                                }}>🗑️ {t('enterprise.tools.delete')}</button>
+                                    (() => {
+                                        const grouped = agentInstalledTools.reduce((acc: Record<string, any[]>, row: any) => {
+                                            const groupKey = mcpToolGroupKey(row);
+                                            (acc[groupKey] = acc[groupKey] || []).push(row);
+                                            return acc;
+                                        }, {});
+                                        const toggleAgentInstalledGroup = (groupKey: string) => {
+                                            setExpandedAgentInstalledGroups(prev => {
+                                                const next = new Set(prev);
+                                                if (next.has(groupKey)) next.delete(groupKey);
+                                                else next.add(groupKey);
+                                                return next;
+                                            });
+                                        };
+                                        return (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                {Object.entries(grouped)
+                                                    .sort(([a, aRows], [b, bRows]) => {
+                                                        const aMeta = getToolGroupMeta(a, aRows as any[]);
+                                                        const bMeta = getToolGroupMeta(b, bRows as any[]);
+                                                        return aMeta.label.localeCompare(bMeta.label);
+                                                    })
+                                                    .map(([groupKey, rows]) => {
+                                                        const groupRows = rows as any[];
+                                                        const meta = getToolGroupMeta(groupKey, groupRows);
+                                                        const expanded = expandedAgentInstalledGroups.has(groupKey);
+                                                        return (
+                                                            <div key={groupKey} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+                                                                <div
+                                                                    role="button"
+                                                                    tabIndex={0}
+                                                                    onClick={() => toggleAgentInstalledGroup(groupKey)}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter' || e.key === ' ') {
+                                                                            e.preventDefault();
+                                                                            toggleAgentInstalledGroup(groupKey);
+                                                                        }
+                                                                    }}
+                                                                    style={{ background: 'var(--bg-secondary)', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}
+                                                                >
+                                                                    <IconChevronDown size={14} stroke={1.8} style={{ color: 'var(--text-tertiary)', transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s ease', flexShrink: 0 }} />
+                                                                    <span style={{ width: '26px', height: '26px', borderRadius: '7px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{renderCategoryIcon(meta.iconCategory, 15)}</span>
+                                                                    <div style={{ minWidth: 0 }}>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                                                            <span style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>{meta.label}</span>
+                                                                            <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                                                {groupRows.length} {groupRows.length === 1 ? 'tool' : 'tools'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{meta.description}</div>
+                                                                    </div>
+                                                                </div>
+                                                                {expanded && groupRows.map((row: any, idx: number) => (
+                                                                    <div key={row.agent_tool_id} style={{
+                                                                        display: 'grid',
+                                                                        gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                                                        gap: '12px',
+                                                                        alignItems: 'center',
+                                                                        padding: '10px 14px',
+                                                                        borderTop: idx === 0 ? '1px solid var(--border-subtle)' : 'none',
+                                                                        borderBottom: idx < groupRows.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                                                                    }}>
+                                                                        <div style={{ minWidth: 0 }}>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexWrap: 'wrap' }}>
+                                                                                <span style={{ fontWeight: 500, fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.tool_display_name}</span>
+                                                                                {row.type === 'mcp' && <span style={{ fontSize: '10px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>}
+                                                                                {row.configured && <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>}
+                                                                            </div>
+                                                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                                {row.installed_by_agent_name || 'Unknown Agent'}
+                                                                                {row.installed_at && <span> · {new Date(row.installed_at).toLocaleString()}</span>}
+                                                                            </div>
+                                                                        </div>
+                                                                        <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={async () => {
+                                                                            const ok = await dialog.confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }), { title: '移除工具', danger: true, confirmLabel: '移除' });
+                                                                            if (!ok) return;
+                                                                            try {
+                                                                                await fetchJson(`/tools/agent-tool/${row.agent_tool_id}`, { method: 'DELETE' });
+                                                                            } catch {
+                                                                                // Already deleted (e.g. removed via Global Tools) — just refresh
+                                                                            }
+                                                                            loadAgentInstalledTools();
+                                                                        }}>{t('enterprise.tools.delete')}</button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })}
                                             </div>
-                                        ))}
-                                    </div>
+                                        );
+                                    })()
                                 )}
                             </div>
                         )}
 
                         {toolsView === 'global' && <>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                                <h3>{t('enterprise.tools.title')}</h3>
+                                <div />
                                 <button className="btn btn-primary" onClick={() => setShowAddMCP(true)}>+ {t('enterprise.tools.addMcpServer')}</button>
                             </div>
 
@@ -2879,7 +4161,7 @@ export default function EnterpriseSettings() {
                                                                         }
                                                                         await loadAllTools();
                                                                     } catch (e: any) {
-                                                                        alert(`${t('enterprise.tools.importFailed') || 'Import failed'}: ${e.message}`);
+                                                                        await dialog.alert(t('enterprise.tools.importFailed') || '导入失败', { type: 'error', details: String(e?.message || e) });
                                                                     }
                                                                 }}>{t('enterprise.tools.import') || 'Import'}</button>
                                                             </div>
@@ -2920,7 +4202,9 @@ export default function EnterpriseSettings() {
                                                                 await loadAllTools();
                                                                 setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '' }); setMcpRawInput('');
                                                                 if (errors.length > 0) {
-                                                                    alert(`Imported ${successCount}/${tools.length} tools.\nFailed:\n${errors.join('\n')}`);
+                                                                    await dialog.alert(`已导入 ${successCount}/${tools.length} 个工具`, { type: 'warning', title: '部分导入失败', details: errors.join('\n') });
+                                                                } else if (successCount > 0) {
+                                                                    toast.success(`已导入 ${successCount} 个工具`);
                                                                 }
                                                             }}>{t('enterprise.tools.importAll')}</button>
                                                         </div>
@@ -2936,293 +4220,251 @@ export default function EnterpriseSettings() {
 
                             {/* ─── Category-grouped tool list ─── */}
                             {(() => {
-                                // Group tools by category (same pattern as AgentDetail.tsx)
-                                const grouped = allTools.reduce((acc: Record<string, any[]>, tool: any) => {
-                                    const cat = tool.category || 'general';
+                                const normalizedSearch = toolSearch.trim().toLowerCase();
+                                const matchesSearch = (tool: any) => {
+                                    if (!normalizedSearch) return true;
+                                    const category = tool.category || 'general';
+                                    const haystack = [
+                                        tool.name,
+                                        tool.display_name,
+                                        tool.description,
+                                        tool.mcp_server_name,
+                                        category,
+                                        categoryLabels[category],
+                                    ].filter(Boolean).join(' ').toLowerCase();
+                                    return haystack.includes(normalizedSearch);
+                                };
+                                const matchesStatus = (tool: any) => {
+                                    if (toolStatusFilter === 'enabled') return !!tool.enabled;
+                                    if (toolStatusFilter === 'disabled') return !tool.enabled;
+                                    if (toolStatusFilter === 'default') return !!tool.is_default;
+                                    if (toolStatusFilter === 'configured') return hasMeaningfulConfig(tool.config);
+                                    return true;
+                                };
+                                const filteredTools = allTools.filter(tool => matchesSearch(tool) && matchesStatus(tool));
+                                const groupTools = (toolList: any[]) => toolList.reduce((acc: Record<string, any[]>, tool: any) => {
+                                    const cat = mcpToolGroupKey(tool);
                                     (acc[cat] = acc[cat] || []).push(tool);
                                     return acc;
                                 }, {} as Record<string, any[]>);
+                                const grouped = groupTools(filteredTools);
+                                const allGrouped = groupTools(allTools);
+                                const hasFilters = !!normalizedSearch || toolStatusFilter !== 'all';
+
+                                const toggleCategoryExpanded = (category: string) => {
+                                    setExpandedToolCategories(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(category)) next.delete(category);
+                                        else next.add(category);
+                                        return next;
+                                    });
+                                };
+
+                                const bulkToggle = async (tools: any[], enabled: boolean) => {
+                                    try {
+                                        const payload = tools.map(t => ({ tool_id: t.id, enabled }));
+                                        await fetchJson('/tools/bulk', { method: 'PUT', body: JSON.stringify(payload) });
+                                        loadAllTools();
+                                    } catch (err: any) {
+                                        toast.error('批量更新失败', { details: String(err?.message || err) });
+                                    }
+                                };
+
+                                const renderToolRow = (tool: any, category: string, idx: number, total: number) => {
+                                    const hasCategoryConfig = !!GLOBAL_CATEGORY_CONFIG_SCHEMAS[category];
+                                    const hasOwnConfig = tool.config_schema?.fields?.length > 0 && !hasCategoryConfig;
+                                    const isConfigured = hasMeaningfulConfig(tool.config);
+                                    return (
+                                        <div key={tool.id} style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                            alignItems: 'center',
+                                            gap: '12px',
+                                            padding: '10px 14px',
+                                            borderTop: idx === 0 ? '1px solid var(--border-subtle)' : 'none',
+                                            borderBottom: idx < total - 1 ? '1px solid var(--border-subtle)' : 'none',
+                                            background: 'var(--bg-primary)',
+                                        }}>
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexWrap: 'wrap' }}>
+                                                    <span style={{ fontWeight: 500, fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tool.display_name}</span>
+                                                    <span style={{ fontSize: '10px', background: tool.type === 'mcp' ? 'var(--primary)' : 'var(--bg-tertiary)', color: tool.type === 'mcp' ? '#fff' : 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>
+                                                        {tool.type === 'mcp' ? 'MCP' : 'Built-in'}
+                                                    </span>
+                                                    {tool.is_default && <span style={{ fontSize: '10px', background: 'rgba(0,200,100,0.15)', color: 'var(--success)', borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>Default</span>}
+                                                    {isConfigured && <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>{t('enterprise.tools.configured', 'Configured')}</span>}
+                                                </div>
+                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                    {tool.description}
+                                                    {tool.mcp_server_name && <span> · {tool.mcp_server_name}</span>}
+                                                </div>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                                {tool.type === 'mcp' && tool.mcp_server_name && (
+                                                    <button
+                                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                                                        onClick={() => setEditingMcpServer({
+                                                            server_name: tool.mcp_server_name,
+                                                            server_url: tool.mcp_server_url || '',
+                                                            api_key: '',
+                                                        })}
+                                                    >
+                                                        Edit Server
+                                                    </button>
+                                                )}
+                                                {hasOwnConfig && (
+                                                    <button
+                                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                                                        title={t('enterprise.tools.configureSettings', 'Configure settings')}
+                                                        onClick={async () => {
+                                                            setEditingToolId(tool.id);
+                                                            setShowAdvancedToolConfig(false);
+                                                            let cfg = applyConfigDefaults(tool.config_schema?.fields || [], tool.config || {});
+                                                            if (tool.name === 'jina_search' || tool.name === 'jina_read') {
+                                                                try {
+                                                                    const token = localStorage.getItem('token');
+                                                                    const res = await fetch('/api/enterprise/system-settings/jina_api_key', { headers: { Authorization: `Bearer ${token}` } });
+                                                                    const d = await res.json();
+                                                                    if (d.value?.api_key) cfg.api_key = d.value.api_key;
+                                                                } catch { }
+                                                            }
+                                                            setEditingConfig(cfg);
+                                                        }}
+                                                    >
+                                                        {t('enterprise.tools.configure')}
+                                                    </button>
+                                                )}
+                                                {tool.type !== 'builtin' && (
+                                                    <button className="btn btn-danger" style={{ padding: '4px 8px', fontSize: '11px' }} onClick={async () => {
+                                                        const ok = await dialog.confirm(`确定删除 ${tool.display_name}？`, { title: '删除工具', danger: true, confirmLabel: '删除' });
+                                                        if (!ok) return;
+                                                        await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
+                                                        loadAllTools();
+                                                        loadAgentInstalledTools();
+                                                    }}>{t('common.delete')}</button>
+                                                )}
+                                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
+                                                    <input type="checkbox" checked={tool.enabled} onChange={async (e) => {
+                                                        await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ enabled: e.target.checked }) });
+                                                        loadAllTools();
+                                                    }} style={{ opacity: 0, width: 0, height: 0 }} />
+                                                    <span style={switchTrack(tool.enabled)}>
+                                                        <span style={switchKnob(tool.enabled)} />
+                                                    </span>
+                                                </label>
+                                            </div>
+                                        </div>
+                                    );
+                                };
 
                                 if (allTools.length === 0) {
                                     return <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>{t('enterprise.tools.emptyState')}</div>;
                                 }
+                                if (filteredTools.length === 0) {
+                                    return (
+                                        <>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
+                                                <div style={{ position: 'relative', flex: '1 1 260px', minWidth: '220px' }}>
+                                                    <IconSearch size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
+                                                    <input value={toolSearch} onChange={(e) => setToolSearch(e.target.value)} placeholder={t('agent.tools.searchTools', 'Search tools...')} style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--border-subtle)', borderRadius: '8px', background: 'var(--bg-primary)', color: 'var(--text-primary)', padding: '8px 10px 8px 32px', fontSize: '13px', outline: 'none' }} />
+                                                </div>
+                                            </div>
+                                            <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>{hasFilters ? t('agent.tools.noMatchingTools', 'No matching tools') : t('enterprise.tools.emptyState')}</div>
+                                        </>
+                                    );
+                                }
 
                                 return (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                        {Object.entries(grouped).map(([category, catTools]) => {
-                                            const hasCategoryConfig = !!GLOBAL_CATEGORY_CONFIG_SCHEMAS[category];
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                            <div style={{ position: 'relative', flex: '1 1 260px', minWidth: '220px' }}>
+                                                <IconSearch size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
+                                                <input value={toolSearch} onChange={(e) => setToolSearch(e.target.value)} placeholder={t('agent.tools.searchTools', 'Search tools...')} style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--border-subtle)', borderRadius: '8px', background: 'var(--bg-primary)', color: 'var(--text-primary)', padding: '8px 10px 8px 32px', fontSize: '13px', outline: 'none' }} />
+                                            </div>
+                                            {(['all', 'enabled', 'disabled', 'default', 'configured'] as const).map(filter => (
+                                                <button key={filter} type="button" onClick={() => setToolStatusFilter(filter)} style={{ border: '1px solid var(--border-subtle)', borderRadius: '999px', background: toolStatusFilter === filter ? 'var(--text-primary)' : 'var(--bg-primary)', color: toolStatusFilter === filter ? 'var(--bg-primary)' : 'var(--text-secondary)', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                                                    {filter === 'all' ? t('common.all', 'All')
+                                                        : filter === 'enabled' ? t('common.enabled', 'Enabled')
+                                                            : filter === 'disabled' ? t('common.disabled', 'Disabled')
+                                                                : filter === 'default' ? 'Default'
+                                                                    : t('agent.tools.configured', 'Configured')}
+                                                </button>
+                                            ))}
+                                            <button type="button" onClick={() => {
+                                                const categories = Object.keys(allGrouped);
+                                                setExpandedToolCategories(prev => prev.size >= categories.length ? new Set() : new Set(categories));
+                                            }} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', background: 'var(--bg-primary)', color: 'var(--text-secondary)', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                                                {expandedToolCategories.size >= Object.keys(allGrouped).length ? t('agent.tools.collapseAll', 'Collapse all') : t('agent.tools.expandAll', 'Expand all')}
+                                            </button>
+                                        </div>
 
-                                            // For 'custom' category: sub-group MCP tools by mcp_server_name
-                                            // so that Edit Server is presented once per server, not per tool.
-                                            if (category === 'custom') {
-                                                const mcpByServer: Record<string, any[]> = {};
-                                                const nonMcpTools: any[] = [];
-                                                (catTools as any[]).forEach((t: any) => {
-                                                    if (t.type === 'mcp' && t.mcp_server_name) {
-                                                        (mcpByServer[t.mcp_server_name] = mcpByServer[t.mcp_server_name] || []).push(t);
-                                                    } else {
-                                                        nonMcpTools.push(t);
-                                                    }
-                                                });
-
-                                                return (
-                                                    <div key={category}>
-                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
-                                                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                                                {categoryLabels[category] || category}
-                                                            </div>
-                                                        </div>
-                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                                                            {/* MCP servers sub-grouped */}
-                                                            {Object.entries(mcpByServer).map(([serverName, serverTools]) => (
-                                                                <div key={serverName} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden' }}>
-                                                                    {/* Server sub-header */}
-                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 14px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-subtle)' }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                                                                            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)' }} title={serverName}>{(() => { try { if (serverName.startsWith('http')) { return new URL(serverName).hostname; } } catch {} return serverName; })()}</span>
-                                                                            <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.12)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>
-                                                                            {(serverTools as any[]).some((t: any) => t.config && Object.keys(t.config).length > 0) && (
-                                                                                <span style={{ fontSize: '10px', background: 'rgba(0,200,100,0.12)', color: 'var(--success)', borderRadius: '4px', padding: '1px 5px' }}>Configured</span>
-                                                                            )}
-                                                                        </div>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                            <button
-                                                                                style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 9px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
-                                                                                onClick={() => {
-                                                                                    // Pre-fill with current server URL from first tool
-                                                                                    const firstTool = (serverTools as any[])[0];
-                                                                                    setEditingMcpServer({
-                                                                                        server_name: serverName,
-                                                                                        server_url: firstTool?.mcp_server_url || '',
-                                                                                        api_key: '',
-                                                                                    });
-                                                                                }}
-                                                                            >Edit Server</button>
-                                                                            {/* Server-level enable/disable all toggle */}
-                                                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${serverName} tools`}>
-                                                                                <input type="checkbox"
-                                                                                    checked={(serverTools as any[]).every(t => t.enabled)}
-                                                                                    onChange={async (e) => {
-                                                                                        const payload = (serverTools as any[]).map(t => ({ tool_id: t.id, enabled: e.target.checked }));
-                                                                                        await fetchJson('/tools/bulk', { method: 'PUT', body: JSON.stringify(payload) });
-                                                                                        loadAllTools();
-                                                                                    }}
-                                                                                    style={{ opacity: 0, width: 0, height: 0 }} />
-                                                                                <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (serverTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s' }}>
-                                                                                    <span style={{ position: 'absolute', left: (serverTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s' }} />
-                                                                                </span>
-                                                                            </label>
-                                                                        </div>
-                                                                    </div>
-                                                                    {/* Tools under this server */}
-                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-                                                                        {(serverTools as any[]).map((tool: any, toolIdx: number) => (
-                                                                            <div key={tool.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderBottom: toolIdx < serverTools.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
-                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
-                                                                                    <span style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>·</span>
-                                                                                    <div style={{ minWidth: 0 }}>
-                                                                                        <div style={{ fontWeight: 500, fontSize: '13px' }}>{tool.display_name}</div>
-                                                                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tool.description?.slice(0, 90)}</div>
-                                                                                    </div>
-                                                                                </div>
-                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                                                                                    <button className="btn btn-danger" style={{ padding: '3px 7px', fontSize: '10px' }} onClick={async () => {
-                                                                                        if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
-                                                                                        await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
-                                                                                        await loadAllTools();
-                                                                                    }}>{t('common.delete')}</button>
-                                                                                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                                                                        <input type="checkbox" checked={tool.enabled} onChange={async (e) => {
-                                                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ enabled: e.target.checked }) });
-                                                                                            loadAllTools();
-                                                                                        }} style={{ opacity: 0, width: 0, height: 0 }} />
-                                                                                        <span style={{ position: 'absolute', inset: 0, background: tool.enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)', borderRadius: '11px', transition: 'background 0.2s' }}>
-                                                                                            <span style={{ position: 'absolute', left: tool.enabled ? '20px' : '2px', top: '2px', width: '18px', height: '18px', background: '#fff', borderRadius: '50%', transition: 'left 0.2s' }} />
-                                                                                        </span>
-                                                                                    </label>
-                                                                                </div>
-                                                                            </div>
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                            ))}
-                                                            {/* Non-MCP custom tools shown normally */}
-                                                            {nonMcpTools.length > 0 && (
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                                                    {nonMcpTools.map((tool: any) => {
-                                                                        const hasOwnConfig = tool.config_schema?.fields?.length > 0;
-                                                                        return (
-                                                                            <div key={tool.id} className="card" style={{ padding: '0', overflow: 'hidden' }}>
-                                                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
-                                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
-                                                                                        <span style={{ fontSize: '18px' }}>{tool.icon}</span>
-                                                                                        <div style={{ minWidth: 0 }}>
-                                                                                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{tool.display_name}</div>
-                                                                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tool.description?.slice(0, 80)}</div>
-                                                                                        </div>
-                                                                                    </div>
-                                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                                                                                        {hasOwnConfig && (
-                                                                                            <button style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => { setEditingToolId(tool.id); setEditingConfig({ ...tool.config }); }}>Configure</button>
-                                                                                        )}
-                                                                                        <button className="btn btn-danger" style={{ padding: '4px 8px', fontSize: '11px' }} onClick={async () => {
-                                                                                            if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
-                                                                                            await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
-                                                                                            loadAllTools();
-                                                                                        }}>{t('common.delete')}</button>
-                                                                                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                                                                            <input type="checkbox" checked={tool.enabled} onChange={async (e) => {
-                                                                                                await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ enabled: e.target.checked }) });
-                                                                                                loadAllTools();
-                                                                                            }} style={{ opacity: 0, width: 0, height: 0 }} />
-                                                                                            <span style={{ position: 'absolute', inset: 0, background: tool.enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)', borderRadius: '11px', transition: 'background 0.2s' }}>
-                                                                                                <span style={{ position: 'absolute', left: tool.enabled ? '20px' : '2px', top: '2px', width: '18px', height: '18px', background: '#fff', borderRadius: '50%', transition: 'left 0.2s' }} />
-                                                                                            </span>
-                                                                                        </label>
-                                                                                    </div>
-                                                                                </div>
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                );
-                                            }
+                                        {Object.entries(grouped)
+                                            .sort(([a, aTools], [b, bTools]) => {
+                                                const aMeta = getToolGroupMeta(a, allGrouped[a] || aTools as any[]);
+                                                const bMeta = getToolGroupMeta(b, allGrouped[b] || bTools as any[]);
+                                                return aMeta.label.localeCompare(bMeta.label);
+                                            })
+                                            .map(([category, catTools]) => {
+                                            const allCatTools = allGrouped[category] || catTools;
+                                            const meta = getToolGroupMeta(category, allCatTools);
+                                            const hasCategoryConfig = !!GLOBAL_CATEGORY_CONFIG_SCHEMAS[meta.configCategory];
+                                            const label = meta.label;
+                                            const enabledCount = allCatTools.filter((tool: any) => tool.enabled).length;
+                                            const defaultCount = allCatTools.filter((tool: any) => tool.is_default).length;
+                                            const configuredCount = allCatTools.filter((tool: any) => hasMeaningfulConfig(tool.config)).length;
+                                            const allEnabled = allCatTools.length > 0 && enabledCount === allCatTools.length;
+                                            const mixed = enabledCount > 0 && enabledCount < allCatTools.length;
+                                            const expanded = expandedToolCategories.has(category) || !!toolSearch.trim();
+                                            const visibleCount = (catTools as any[]).length;
 
                                             return (
-                                                <div key={category}>
-                                                    {/* Category header */}
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
-                                                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                                            {categoryLabels[category] || category}
+                                                <div key={category} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+                                                    <div role="button" tabIndex={0} onClick={() => toggleCategoryExpanded(category)} onKeyDown={(e) => {
+                                                        if (e.key === 'Enter' || e.key === ' ') {
+                                                            e.preventDefault();
+                                                            toggleCategoryExpanded(category);
+                                                        }
+                                                    }} style={{ width: '100%', background: 'var(--bg-secondary)', padding: '13px 16px', display: 'grid', gridTemplateColumns: '1fr auto', gap: '14px', alignItems: 'center', cursor: 'pointer', textAlign: 'left', boxSizing: 'border-box' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+                                                            <IconChevronDown size={16} style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 120ms ease', color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                                                            <span style={{ width: '28px', height: '28px', borderRadius: '7px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{renderCategoryIcon(meta.iconCategory, 16)}</span>
+                                                            <div style={{ minWidth: 0 }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                                                    <span style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>{label}</span>
+                                                                    <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                                        {allCatTools.length} tools · {enabledCount} enabled
+                                                                        {defaultCount > 0 ? ` · ${defaultCount} default` : ''}
+                                                                        {visibleCount !== allCatTools.length ? ` · ${visibleCount} shown` : ''}
+                                                                    </span>
+                                                                    {configuredCount > 0 && <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{configuredCount} configured</span>}
+                                                                </div>
+                                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{meta.description}</div>
+                                                            </div>
                                                         </div>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
                                                             {hasCategoryConfig && (
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setConfigCategory(category);
-                                                                        setEditingConfig({});
-                                                                        // Load existing global config from the first tool in this category that has a non-empty config.
-                                                                        // Do NOT require config_schema — some categories (e.g. AgentBay)
-                                                                        // define their schema only in frontend CATEGORY_CONFIG_SCHEMAS.
-                                                                        const firstToolWithConfig = (catTools as any[]).find((tl: any) => tl.config && Object.keys(tl.config).length > 0);
-                                                                        if (firstToolWithConfig?.config) {
-                                                                            setEditingConfig({ ...firstToolWithConfig.config });
-                                                                        }
-                                                                    }}
-                                                                    style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
-                                                                    title={`Configure ${category}`}
-                                                                >
-                                                                    ⚙️ {t('enterprise.tools.configure', 'Configure')}
+                                                                <button onClick={() => {
+                                                                    setConfigCategory(meta.configCategory);
+                                                                    setEditingConfig({});
+                                                                    const firstToolWithConfig = (allCatTools as any[]).find((tl: any) => tl.category === meta.configCategory && hasMeaningfulConfig(tl.config));
+                                                                    if (firstToolWithConfig?.config) setEditingConfig({ ...firstToolWithConfig.config });
+                                                                }} style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }} title={`Configure ${label}`}>
+                                                                    {t('enterprise.tools.configure', 'Configure')}
                                                                 </button>
                                                             )}
-                                                            {/* Category Bulk Toggle */}
-                                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${categoryLabels[category] || category} tools`}>
-                                                                <input type="checkbox"
-                                                                    checked={(catTools as any[]).every(t => t.enabled)}
-                                                                    onChange={async (e) => {
-                                                                        const targetEnabled = e.target.checked;
-                                                                        try {
-                                                                            const payload = (catTools as any[]).map(t => ({ tool_id: t.id, enabled: targetEnabled }));
-                                                                            await fetchJson('/tools/bulk', { method: 'PUT', body: JSON.stringify(payload) });
-                                                                            loadAllTools();
-                                                                        } catch (err: any) {
-                                                                            alert('Bulk update failed: ' + err.message);
-                                                                        }
-                                                                    }}
-                                                                    style={{ opacity: 0, width: 0, height: 0 }} />
-                                                                <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (catTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}>
-                                                                    <span style={{ position: 'absolute', left: (catTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} />
+                                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${label} tools`}>
+                                                                <input type="checkbox" checked={allEnabled} onChange={(e) => void bulkToggle(allCatTools, e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
+                                                                <span style={switchTrack(allEnabled, mixed)}>
+                                                                    <span style={switchKnob(allEnabled)} />
                                                                 </span>
                                                             </label>
                                                         </div>
                                                     </div>
-
-                                                    {/* Tools in this category */}
-                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                                        {(catTools as any[]).map((tool: any) => {
-                                                            // If this category has shared config, individual tool config buttons are hidden
-                                                            const hasOwnConfig = tool.config_schema?.fields?.length > 0 && !hasCategoryConfig;
-                                                            const isEditing = editingToolId === tool.id;
-
-                                                            return (
-                                                                <div key={tool.id} className="card" style={{ padding: '0', overflow: 'hidden' }}>
-                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
-                                                                            <span style={{ fontSize: '18px' }}>{tool.icon}</span>
-                                                                            <div style={{ minWidth: 0 }}>
-                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                                    <span style={{ fontWeight: 500, fontSize: '13px' }}>{tool.display_name}</span>
-                                                                                    <span style={{ fontSize: '10px', background: tool.type === 'mcp' ? 'var(--primary)' : 'var(--bg-tertiary)', color: tool.type === 'mcp' ? '#fff' : 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px' }}>
-                                                                                        {tool.type === 'mcp' ? 'MCP' : 'Built-in'}
-                                                                                    </span>
-                                                                                    {tool.is_default && <span style={{ fontSize: '10px', background: 'rgba(0,200,100,0.15)', color: 'var(--success)', borderRadius: '4px', padding: '1px 5px' }}>Default</span>}
-                                                                                    {tool.config && Object.keys(tool.config).length > 0 && (
-                                                                                        <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>
-                                                                                    )}
-                                                                                </div>
-                                                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                                    {tool.description?.slice(0, 80)}
-                                                                                    {tool.mcp_server_name && <span> · {tool.mcp_server_name}</span>}
-                                                                                </div>
-                                                                            </div>
-                                                                        </div>
-
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                                                                            {/* Per-tool config button: only if the tool has its own schema AND is NOT part of a category config */}
-                                                                            {hasOwnConfig && (
-                                                                                <button
-                                                                                    style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
-                                                                                    title={t('enterprise.tools.configureSettings', 'Configure settings')}
-                                                                                    onClick={async () => {
-                                                                                        setEditingToolId(tool.id);
-                                                                                        const cfg = { ...tool.config };
-                                                                                        if (tool.name === 'jina_search' || tool.name === 'jina_read') {
-                                                                                            try {
-                                                                                                const token = localStorage.getItem('token');
-                                                                                                const res = await fetch('/api/enterprise/system-settings/jina_api_key', { headers: { Authorization: `Bearer ${token}` } });
-                                                                                                const d = await res.json();
-                                                                                                if (d.value?.api_key) cfg.api_key = d.value.api_key;
-                                                                                            } catch { }
-                                                                                        }
-                                                                                        setEditingConfig(cfg);
-                                                                                    }}
-                                                                                >
-                                                                                    ⚙️ {t('enterprise.tools.configure')}
-                                                                                </button>
-                                                                            )}
-
-                                                                            {/* Delete (non-builtin only) */}
-                                                                            {tool.type !== 'builtin' && (
-                                                                                <button className="btn btn-danger" style={{ padding: '4px 8px', fontSize: '11px' }} onClick={async () => {
-                                                                                    if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
-                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
-                                                                                    loadAllTools();
-                                                                                    loadAgentInstalledTools();
-                                                                                }}>{t('common.delete')}</button>
-                                                                            )}
-
-                                                                            {/* Enable toggle */}
-                                                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                                                                <input type="checkbox" checked={tool.enabled} onChange={async (e) => {
-                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ enabled: e.target.checked }) });
-                                                                                    loadAllTools();
-                                                                                }} style={{ opacity: 0, width: 0, height: 0 }} />
-                                                                                <span style={{ position: 'absolute', inset: 0, background: tool.enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)', borderRadius: '11px', transition: 'background 0.2s' }}>
-                                                                                    <span style={{ position: 'absolute', left: tool.enabled ? '20px' : '2px', top: '2px', width: '18px', height: '18px', background: '#fff', borderRadius: '50%', transition: 'left 0.2s' }} />
-                                                                                </span>
-                                                                            </label>
-                                                                        </div>
-                                                                    </div>
-
-                                                                    {/* Inline config editing form (per-tool only) */}
-                                                                    {/* Inline config editing form replaced by global modal */}
-                                                                </div>
-                                                            );
-                                                        })}
-                                                    </div>
+                                                    {expanded && (
+                                                        <div>
+                                                            {(catTools as any[]).map((tool: any, idx: number) => renderToolRow(tool, category, idx, (catTools as any[]).length))}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })}
@@ -3296,7 +4538,7 @@ export default function EnterpriseSettings() {
                                                     await loadAllTools();
                                                     setEditingMcpServer(null);
                                                 } catch (e: any) {
-                                                    alert('Failed to update server: ' + e.message);
+                                                    toast.error('更新服务器失败', { details: String(e?.message || e) });
                                                 }
                                                 setMcpServerSaving(false);
                                             }}>{mcpServerSaving ? 'Saving...' : 'Save Changes'}</button>
@@ -3309,68 +4551,96 @@ export default function EnterpriseSettings() {
                             {editingToolId && (() => {
                                 const tool = allTools.find(t => t.id === editingToolId);
                                 if (!tool) return null;
+                                const visibleFields = (tool.config_schema.fields || []).filter((field: any) => {
+                                    if (field.depends_on) {
+                                        return Object.entries(field.depends_on).every(([k, vals]: [string, any]) =>
+                                            vals.includes(editingConfig[k])
+                                        );
+                                    }
+                                    return true;
+                                });
+                                const primaryFields = visibleFields.filter((field: any) => !field.advanced);
+                                const advancedFields = visibleFields.filter((field: any) => field.advanced);
+                                const renderField = (field: any) => (
+                                    <div key={field.key}>
+                                        <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>{field.label}</label>
+                                        {field.type === 'checkbox' ? (
+                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={editingConfig[field.key] ?? field.default ?? false}
+                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.checked }))}
+                                                    style={{ opacity: 0, width: 0, height: 0 }}
+                                                />
+                                                <span style={{
+                                                    position: 'absolute', inset: 0,
+                                                    background: (editingConfig[field.key] ?? field.default) ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                                                    borderRadius: '11px', transition: 'background 0.2s',
+                                                }}>
+                                                    <span style={{
+                                                        position: 'absolute', left: (editingConfig[field.key] ?? field.default) ? '20px' : '2px', top: '2px',
+                                                        width: '18px', height: '18px', background: '#fff',
+                                                        borderRadius: '50%', transition: 'left 0.2s',
+                                                    }} />
+                                                </span>
+                                            </label>
+                                        ) : field.type === 'select' ? (
+                                            <select className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}>
+                                                {(field.options || []).map((opt: any) => (
+                                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                ))}
+                                            </select>
+                                        ) : field.type === 'number' ? (
+                                            <input type="number" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} min={field.min} max={field.max}
+                                                onChange={e => setEditingConfig(p => ({ ...p, [field.key]: Number(e.target.value) }))} />
+                                        ) : field.type === 'textarea' ? (
+                                            <textarea
+                                                className="form-input"
+                                                value={editingConfig[field.key] ?? field.default ?? ''}
+                                                placeholder={field.placeholder || ''}
+                                                rows={Math.max(3, Math.min(10, String(editingConfig[field.key] ?? field.default ?? field.placeholder ?? '').split('\n').length))}
+                                                style={{ minHeight: '88px', fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)', resize: 'vertical' }}
+                                                onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}
+                                            />
+                                        ) : field.type === 'password' ? (
+                                            <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
+                                                onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
+                                        ) : (
+                                            <input type="text" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} placeholder={field.placeholder || ''}
+                                                onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
+                                        )}
+                                    </div>
+                                );
                                 return (
                                     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.55)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                                         onClick={() => setEditingToolId(null)}>
                                         <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', width: '480px', maxWidth: '95vw', maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                                 <div>
-                                                    <h3 style={{ margin: 0 }}>⚙️ {tool.display_name}</h3>
+                                                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}><IconSettings size={20} stroke={1.8} /> {tool.display_name}</h3>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>Global configuration used by all agents</div>
                                                 </div>
                                                 <button onClick={() => setEditingToolId(null)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)' }}>✕</button>
                                             </div>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                                {(tool.config_schema.fields || []).map((field: any) => {
-                                                    // Check depends_on
-                                                    if (field.depends_on) {
-                                                        const visible = Object.entries(field.depends_on).every(([k, vals]: [string, any]) =>
-                                                            vals.includes(editingConfig[k])
-                                                        );
-                                                        if (!visible) return null;
-                                                    }
-                                                    return (
-                                                        <div key={field.key}>
-                                                            <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>{field.label}</label>
-                                                            {field.type === 'checkbox' ? (
-                                                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer' }}>
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={editingConfig[field.key] ?? field.default ?? false}
-                                                                        onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.checked }))}
-                                                                        style={{ opacity: 0, width: 0, height: 0 }}
-                                                                    />
-                                                                    <span style={{
-                                                                        position: 'absolute', inset: 0,
-                                                                        background: (editingConfig[field.key] ?? field.default) ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                                                        borderRadius: '11px', transition: 'background 0.2s',
-                                                                    }}>
-                                                                        <span style={{
-                                                                            position: 'absolute', left: (editingConfig[field.key] ?? field.default) ? '20px' : '2px', top: '2px',
-                                                                            width: '18px', height: '18px', background: '#fff',
-                                                                            borderRadius: '50%', transition: 'left 0.2s',
-                                                                        }} />
-                                                                    </span>
-                                                                </label>
-                                                            ) : field.type === 'select' ? (
-                                                                <select className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}>
-                                                                    {(field.options || []).map((opt: any) => (
-                                                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                                                    ))}
-                                                                </select>
-                                                            ) : field.type === 'number' ? (
-                                                                <input type="number" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} min={field.min} max={field.max}
-                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: Number(e.target.value) }))} />
-                                                            ) : field.type === 'password' ? (
-                                                                <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
-                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
-                                                            ) : (
-                                                                <input type="text" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} placeholder={field.placeholder || ''}
-                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
+                                                {primaryFields.map(renderField)}
+                                                {advancedFields.length > 0 && (
+                                                    <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '10px', marginTop: '2px' }}>
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-ghost"
+                                                            onClick={() => setShowAdvancedToolConfig(v => !v)}
+                                                            style={{ padding: 0, minWidth: 'auto', fontSize: '12px', color: 'var(--text-secondary)' }}
+                                                        >
+                                                            {showAdvancedToolConfig ? 'Hide advanced settings' : 'Advanced settings'}
+                                                        </button>
+                                                        {showAdvancedToolConfig && (
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
+                                                                {advancedFields.map(renderField)}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
                                                 <div style={{ display: 'flex', gap: '8px', marginTop: '12px', justifyContent: 'flex-end', borderTop: '1px solid var(--border-subtle)', paddingTop: '16px' }}>
                                                     <button className="btn btn-secondary" onClick={() => setEditingToolId(null)}>{t('common.cancel')}</button>
                                                     <button className="btn btn-primary" onClick={async () => {
@@ -3384,7 +4654,7 @@ export default function EnterpriseSettings() {
                                                                 });
                                                             }
                                                         } else {
-                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig, tenant_id: selectedTenantId || undefined }) });
                                                         }
                                                         setEditingToolId(null);
                                                         loadAllTools();
@@ -3428,12 +4698,12 @@ export default function EnterpriseSettings() {
                                             <div style={{ display: 'flex', gap: '8px', marginTop: '8px', justifyContent: 'flex-end' }}>
                                                 <button className="btn btn-secondary" onClick={() => setConfigCategory(null)}>{t('common.cancel')}</button>
                                                 <button className="btn btn-primary" onClick={async () => {
-                                                    // Save config to the first tool in this category.
-                                                    // We write to one representative tool per category;
-                                                    // get_category_config endpoint reads it back.
+                                                    // Save config to the category's runtime representative tool.
                                                     const catTools = allTools.filter((tl: any) => (tl.category || 'general') === configCategory);
-                                                    if (catTools.length > 0) {
-                                                        await fetchJson(`/tools/${catTools[0].id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                    const primaryToolName = GLOBAL_CATEGORY_CONFIG_PRIMARY_TOOL[configCategory];
+                                                    const representativeTool = catTools.find((tl: any) => tl.name === primaryToolName) || catTools[0];
+                                                    if (representativeTool) {
+                                                        await fetchJson(`/tools/${representativeTool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig, tenant_id: selectedTenantId || undefined }) });
                                                     }
                                                     setConfigCategory(null);
                                                     loadAllTools();
